@@ -1,3 +1,4 @@
 streamlit
 yt-dlp
 requests
+faster-whisper

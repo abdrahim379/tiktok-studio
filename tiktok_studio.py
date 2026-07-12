@@ -59,7 +59,7 @@ st.title("🎬 TikTok Studio")
 st.markdown("**Four tools in one app** — Download videos, generate variants, refresh metadata, or find similar content")
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📥 TikTok Downloader", "🎛️ Variant Generator", "🔄 Refresh Metadata", "🔍 Find Similar", "🎵 Extract Audio"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📥 TikTok Downloader", "🎛️ Variant Generator", "🔄 Refresh Metadata", "🔍 Find Similar", "🎵 Extract Audio", "📝 Extract Text"])
 
 
 # ============================================================
@@ -1786,3 +1786,174 @@ with tab5:
 | M4A | Keeping original TikTok audio quality (no re-encode) | Fastest | Small |
 | WAV | Audio editing / production | Fast | Very large |
         """)
+
+
+# ============================================================
+# TAB 6 — Extract Text (speech-to-text transcription)
+# ============================================================
+with tab6:
+    st.header("📝 Extract Text from Videos")
+    st.markdown(
+        "Transcribe the speech in your videos to text — **Arabic** or **English** — "
+        "then copy it directly or download it as a `.txt` file. "
+        "Runs 100% locally, no API key needed."
+    )
+
+    try:
+        from faster_whisper import WhisperModel
+        _fw_ok = True
+    except ImportError:
+        _fw_ok = False
+
+    if not _fw_ok:
+        st.error("The transcription engine isn't installed yet. Run this in Terminal, then restart the app:")
+        st.code("pip install faster-whisper", language="bash")
+    else:
+        @st.cache_resource(show_spinner=False)
+        def et_load_model(size):
+            return WhisperModel(size, device="cpu", compute_type="int8")
+
+        st.subheader("Step 1 — Upload Videos / Audio")
+        et_files = st.file_uploader(
+            "Drop one or more video or audio files",
+            type=["mp4", "mov", "m4v", "avi", "mkv", "webm", "mp3", "m4a", "wav"],
+            accept_multiple_files=True,
+            key="et_files",
+        )
+
+        st.subheader("Step 2 — Options")
+        et_col1, et_col2 = st.columns(2)
+        with et_col1:
+            et_lang_choice = st.selectbox(
+                "Language",
+                ["Auto-detect", "Arabic (العربية)", "English"],
+                help="Pick the spoken language for best accuracy, or let it auto-detect.",
+            )
+        with et_col2:
+            et_model_size = st.select_slider(
+                "Accuracy vs speed",
+                options=["base", "small", "medium"],
+                value="small",
+                help="base = fastest, medium = most accurate (especially for Arabic). "
+                     "First use of a size downloads the model once (~150 MB–1.5 GB).",
+            )
+
+        ET_LANG_CODES = {"Auto-detect": None, "Arabic (العربية)": "ar", "English": "en"}
+
+        st.subheader("Step 3 — Extract Text")
+        et_go = st.button(
+            f"📝 Extract Text from {len(et_files) if et_files else 0} File(s)",
+            use_container_width=True,
+            disabled=not et_files,
+        )
+
+        if "et_results" not in st.session_state:
+            st.session_state.et_results = []
+
+        if et_go and et_files:
+            st.session_state.et_results = []
+            et_progress = st.progress(0)
+            et_status = st.empty()
+            total = len(et_files)
+
+            with et_status, st.spinner(f"Loading `{et_model_size}` model (first time downloads it)..."):
+                et_model = et_load_model(et_model_size)
+
+            with tempfile.TemporaryDirectory() as et_tmpdir:
+                for idx, et_file in enumerate(et_files):
+                    et_status.markdown(f"📝 Transcribing **{idx+1}/{total}** — `{et_file.name}`")
+
+                    in_path = os.path.join(et_tmpdir, f"in_{idx}_{et_file.name}")
+                    with open(in_path, "wb") as f:
+                        f.write(et_file.getbuffer())
+
+                    # Convert to 16 kHz mono WAV — what Whisper expects
+                    wav_path = os.path.join(et_tmpdir, f"audio_{idx}.wav")
+                    conv = subprocess.run(
+                        [FFMPEG, "-y", "-i", in_path, "-vn",
+                         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path],
+                        capture_output=True, timeout=300,
+                    )
+                    if conv.returncode != 0 or not os.path.exists(wav_path):
+                        err = conv.stderr.decode(errors="replace")[-200:] if conv.stderr else "no audio track?"
+                        st.session_state.et_results.append(
+                            {"name": et_file.name, "text": "", "lang": "", "error": err}
+                        )
+                        et_progress.progress((idx + 1) / total)
+                        continue
+
+                    try:
+                        segments, info = et_model.transcribe(
+                            wav_path,
+                            language=ET_LANG_CODES[et_lang_choice],
+                            vad_filter=True,
+                        )
+                        text = "\n".join(s.text.strip() for s in segments).strip()
+                        st.session_state.et_results.append({
+                            "name": et_file.name,
+                            "text": text or "(no speech detected)",
+                            "lang": info.language,
+                            "error": None,
+                        })
+                    except Exception as e:
+                        st.session_state.et_results.append(
+                            {"name": et_file.name, "text": "", "lang": "", "error": str(e)}
+                        )
+
+                    try:
+                        os.unlink(in_path)
+                        os.unlink(wav_path)
+                    except Exception:
+                        pass
+                    et_progress.progress((idx + 1) / total)
+
+            ok_count = sum(1 for r in st.session_state.et_results if not r["error"])
+            if ok_count:
+                et_status.success(f"✅ {ok_count}/{total} file(s) transcribed!")
+            else:
+                et_status.error("No files could be transcribed.")
+
+        # ---- Results (persist across reruns so copy/download always work) ----
+        if st.session_state.et_results:
+            st.markdown("---")
+            st.subheader("Results")
+            ET_LANG_NAMES = {"ar": "Arabic", "en": "English"}
+
+            for i, r in enumerate(st.session_state.et_results):
+                if r["error"]:
+                    st.error(f"❌ **{r['name']}** — {r['error']}")
+                    continue
+
+                lang_name = ET_LANG_NAMES.get(r["lang"], r["lang"])
+                st.markdown(f"#### 🎬 {r['name']}  \n_Detected language: **{lang_name}**_")
+                st.text_area(
+                    "Transcription (click inside → Cmd/Ctrl+A → copy)",
+                    value=r["text"],
+                    height=200,
+                    key=f"et_text_{i}",
+                )
+                st.download_button(
+                    label="⬇️ Download .txt",
+                    data=r["text"].encode("utf-8"),
+                    file_name=os.path.splitext(r["name"])[0] + ".txt",
+                    mime="text/plain",
+                    key=f"et_dl_{i}",
+                )
+                st.markdown("---")
+
+            # Combined download when several files were transcribed
+            et_ok = [r for r in st.session_state.et_results if not r["error"]]
+            if len(et_ok) > 1:
+                combined = "\n\n".join(
+                    f"===== {r['name']} =====\n{r['text']}" for r in et_ok
+                )
+                st.download_button(
+                    label=f"⬇️ Download ALL as one .txt ({len(et_ok)} files)",
+                    data=combined.encode("utf-8"),
+                    file_name=f"transcriptions_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    mime="text/plain",
+                    key="et_dl_all",
+                    use_container_width=True,
+                )
+        elif not et_files:
+            st.info("Upload videos above, choose the language, then click **Extract Text**.")
