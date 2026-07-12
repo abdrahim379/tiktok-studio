@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import subprocess, os, datetime, tempfile, json, re, time, random, uuid
-import zipfile, io, traceback, requests
+import zipfile, io, traceback, requests, threading, shutil
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Resolve tool paths (works even when Streamlit strips PATH) ──────────
 def _find_bin(name):
@@ -58,7 +59,7 @@ st.title("🎬 TikTok Studio")
 st.markdown("**Four tools in one app** — Download videos, generate variants, refresh metadata, or find similar content")
 st.markdown("---")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📥 TikTok Downloader", "🎛️ Variant Generator", "🔄 Refresh Metadata", "🔍 Find Similar"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📥 TikTok Downloader", "🎛️ Variant Generator", "🔄 Refresh Metadata", "🔍 Find Similar", "🎵 Extract Audio"])
 
 
 # ============================================================
@@ -123,85 +124,125 @@ with tab1:
                 continue
         return videos
 
-    def download_videos_ytdlp(video_list, output_dir, progress_bar, status_text):
-        """Download using the actual video URL stored at extraction time.
-        Retries with fallback formats, handles per-video timeouts, and
-        reports exactly which videos failed and why."""
+    def _find_completed_file(vid_dir, vid_id):
+        """Return path of a fully-downloaded file for vid_id, or None."""
+        if not os.path.isdir(vid_dir):
+            return None
+        for fname in os.listdir(vid_dir):
+            if fname.startswith(vid_id) and not fname.endswith((".part", ".ytdl", ".tmp")):
+                fpath = os.path.join(vid_dir, fname)
+                if os.path.getsize(fpath) > 0:
+                    return fpath
+        return None
+
+    def _download_one(vid_id, vid_url, output_dir, start_delay=0):
+        """Download a single video into its own subdirectory. Returns (vid_id, filepath|None, err|None)."""
+        vid_dir = os.path.join(output_dir, vid_id)
+
+        # Resume support: already fully downloaded in a previous run → skip instantly
+        existing = _find_completed_file(vid_dir, vid_id)
+        if existing:
+            return vid_id, existing, None
+
+        if start_delay:
+            time.sleep(start_delay)
+
+        os.makedirs(vid_dir, exist_ok=True)
+        output_template = os.path.join(vid_dir, f"{vid_id}.%(ext)s")
+
+        FORMAT_ATTEMPTS = ["bestvideo+bestaudio/best", "best", "worst"]
+        last_err = ""
+
+        for fmt in FORMAT_ATTEMPTS:
+            cmd = [
+                YTDLP, "-f", fmt,
+                "--merge-output-format", "mp4",
+                "--no-warnings", "--no-check-certificate",
+                "--extractor-retries", "5",
+                "--retries", "10",
+                "--fragment-retries", "10",
+                "--retry-sleep", "3",
+                "--sleep-requests", "1",
+                "-o", output_template,
+                vid_url,
+            ]
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=240)
+            except subprocess.TimeoutExpired:
+                last_err = "timed out after 240s"
+                time.sleep(2)
+                continue
+
+            if result.returncode == 0:
+                fpath = _find_completed_file(vid_dir, vid_id)
+                if fpath:
+                    return vid_id, fpath, None
+                last_err = "file missing after download"
+            else:
+                last_err = result.stderr.decode(errors="replace")[-300:] if result.stderr else "unknown error"
+
+            time.sleep(1.5)
+
+        return vid_id, None, last_err
+
+    def download_videos_ytdlp(video_list, output_dir, progress_bar, status_text, max_workers=5):
+        """Parallel download: runs up to max_workers videos simultaneously."""
         downloaded = []
         failed = []
         total = len(video_list)
+        completed = 0
+        lock = threading.Lock()
 
-        # Build a map id → url from session state for lookup
-        id_to_url = {v["id"]: v["url"] for v in st.session_state.dl_videos}
+        # Build id → url from the list itself (falls back to session state)
+        id_to_url = {}
+        for v in video_list:
+            if isinstance(v, dict) and v.get("url"):
+                id_to_url[v["id"]] = v["url"]
+        for v in st.session_state.get("dl_videos", []):
+            id_to_url.setdefault(v["id"], v["url"])
 
-        # Format fallbacks — try best combined first, fall back progressively
-        FORMAT_ATTEMPTS = [
-            "bestvideo+bestaudio/best",
-            "best",
-            "worst",  # last resort — better to get something than nothing
-        ]
+        status_text.markdown(
+            f"⬇️ Downloading **{total}** videos — **{max_workers} parallel workers**"
+        )
+        progress_bar.progress(0)
 
-        for idx, vid in enumerate(video_list):
-            vid_id  = vid if isinstance(vid, str) else vid["id"]
-            vid_url = id_to_url.get(vid_id, f"https://www.tiktok.com/@x/video/{vid_id}")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _download_one,
+                    (vid if isinstance(vid, str) else vid["id"]),
+                    id_to_url.get(
+                        (vid if isinstance(vid, str) else vid["id"]),
+                        f"https://www.tiktok.com/@x/video/{(vid if isinstance(vid, str) else vid['id'])}"
+                    ),
+                    output_dir,
+                    # small random jitter so parallel workers don't hit TikTok
+                    # at the exact same instant (never grows with batch size)
+                    random.uniform(0.1, 1.0) if i else 0,
+                ): vid
+                for i, vid in enumerate(video_list)
+            }
 
-            progress_bar.progress(idx / total)
-
-            output_template = os.path.join(output_dir, f"{vid_id}.%(ext)s")
-            success = False
-            last_err = ""
-
-            for attempt, fmt in enumerate(FORMAT_ATTEMPTS):
-                status_text.markdown(
-                    f"⬇️ Downloading **{idx+1}/{total}** — `{vid_id}`"
-                    + (f" (retry {attempt+1}/{len(FORMAT_ATTEMPTS)})" if attempt else "")
-                )
-                cmd = [
-                    YTDLP,
-                    "-f", fmt,
-                    "--merge-output-format", "mp4",
-                    "--no-warnings",
-                    "--no-check-certificate",
-                    "--extractor-retries", "5",
-                    "--retries", "10",
-                    "--fragment-retries", "10",
-                    "--retry-sleep", "3",
-                    "--sleep-requests", "1",
-                    "-o", output_template,
-                    vid_url,
-                ]
+            for future in as_completed(futures):
                 try:
-                    result = subprocess.run(cmd, capture_output=True, timeout=240)
-                except subprocess.TimeoutExpired:
-                    last_err = "timed out after 240s"
-                    time.sleep(2)
-                    continue
+                    vid_id, fpath, err = future.result()
+                except Exception as exc:
+                    vid_id = "unknown"
+                    fpath, err = None, str(exc)
 
-                if result.returncode == 0:
-                    # Check the file actually exists and is non-empty
-                    for fname in os.listdir(output_dir):
-                        if fname.startswith(vid_id):
-                            fpath = os.path.join(output_dir, fname)
-                            if os.path.getsize(fpath) > 0:
-                                downloaded.append(fpath)
-                                success = True
-                            break
-                    if success:
-                        break
-                else:
-                    last_err = result.stderr.decode(errors="replace")[-300:] if result.stderr else "unknown error"
+                with lock:
+                    completed += 1
+                    if fpath:
+                        downloaded.append(fpath)
+                    else:
+                        failed.append((vid_id, err or "unknown error"))
 
-                # small delay before retrying with a different format
-                time.sleep(1.5)
-
-            if not success:
-                failed.append((vid_id, last_err))
-                status_text.markdown(f"⚠️ Failed `{vid_id}` after {len(FORMAT_ATTEMPTS)} attempts — {last_err}")
-
-            progress_bar.progress((idx + 1) / total)
-
-            # Be polite to TikTok between videos to avoid rate-limit blocks
-            time.sleep(1)
+                    progress_bar.progress(completed / total)
+                    status_text.markdown(
+                        f"⬇️ **{completed}/{total}** complete"
+                        + (f" — ✅ {len(downloaded)} OK" if downloaded else "")
+                        + (f" — ⚠️ {len(failed)} failed" if failed else "")
+                    )
 
         if failed:
             status_text.markdown(
@@ -210,6 +251,157 @@ with tab1:
             )
 
         return downloaded, failed
+
+    # ---- Persistent batches (survive sleep / connection loss / restart) ----
+    DL_ROOT = os.path.expanduser("~/.tiktok_studio_downloads")
+
+    def dl_save_manifest(batch_dir, manifest):
+        os.makedirs(batch_dir, exist_ok=True)
+        with open(os.path.join(batch_dir, "manifest.json"), "w") as f:
+            json.dump(manifest, f)
+
+    def dl_load_manifest(batch_dir):
+        try:
+            with open(os.path.join(batch_dir, "manifest.json")) as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def dl_list_batches():
+        batches = []
+        if os.path.isdir(DL_ROOT):
+            for name in sorted(os.listdir(DL_ROOT), reverse=True):
+                bdir = os.path.join(DL_ROOT, name)
+                m = dl_load_manifest(bdir)
+                if m:
+                    batches.append((bdir, m))
+        return batches
+
+    def dl_count_completed(batch_dir, video_ids):
+        return sum(
+            1 for vid_id in video_ids
+            if _find_completed_file(os.path.join(batch_dir, vid_id), vid_id)
+        )
+
+    def dl_execute_batch(batch_dir, manifest):
+        """Download all videos of a batch (skipping ones already on disk), then offer the ZIP.
+        Files stay on disk until everything succeeds, so an interrupted run can resume."""
+        videos = manifest["videos"]
+        total = len(videos)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            downloaded, failed = download_videos_ytdlp(
+                videos, batch_dir, progress_bar, status_text,
+                max_workers=manifest.get("workers", 5),
+            )
+
+            if downloaded:
+                # Write the ZIP to disk — it survives reruns/restarts, and the
+                # persistent "Ready ZIPs" section serves it reliably.
+                zip_path = os.path.join(
+                    DL_ROOT, f"tiktok_videos_{os.path.basename(batch_dir)}.zip"
+                )
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for fp in downloaded:
+                        zf.write(fp, os.path.basename(fp))
+
+                progress_bar.progress(1.0)
+
+                if failed:
+                    # Keep the batch resumable so failed ones can be retried,
+                    # remember the errors for display
+                    manifest["last_failed"] = [[vid_id, err] for vid_id, err in failed]
+                    dl_save_manifest(batch_dir, manifest)
+                else:
+                    # Complete — mark done and free the disk space (ZIP is kept)
+                    manifest["status"] = "done"
+                    dl_save_manifest(batch_dir, manifest)
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+
+                # Rerun so the persistent ZIP section at the top shows the file
+                st.rerun()
+            else:
+                status_text.error(
+                    "No videos downloaded. Progress is saved — "
+                    "check your connection and click **Resume** to continue."
+                )
+                if failed:
+                    with st.expander("Error details"):
+                        for vid_id, err in failed:
+                            st.markdown(f"**{vid_id}**: {err}")
+        except Exception as e:
+            status_text.error(
+                f"Download interrupted: {e} — progress is saved, use **Resume** to continue."
+            )
+
+    # ---- Resume unfinished batches ----
+    dl_unfinished = [(d, m) for d, m in dl_list_batches() if m.get("status") != "done"]
+    if dl_unfinished:
+        st.markdown("### ⏯️ Unfinished downloads")
+        st.caption(
+            "These batches were interrupted (sleep, lost connection, closed app). "
+            "Already-downloaded videos are saved — Resume only downloads what's missing."
+        )
+        for bdir, m in dl_unfinished:
+            batch_name = os.path.basename(bdir)
+            vid_ids = [v["id"] for v in m.get("videos", [])]
+            done_count = dl_count_completed(bdir, vid_ids)
+            c1, c2, c3 = st.columns([3, 1, 1])
+            with c1:
+                st.markdown(
+                    f"📦 **{batch_name}** — {done_count}/{len(vid_ids)} downloaded, "
+                    f"{len(vid_ids) - done_count} remaining"
+                )
+            with c2:
+                resume_clicked = st.button("▶️ Resume", key=f"resume_{batch_name}", use_container_width=True)
+            with c3:
+                if st.button("🗑️ Delete", key=f"delbatch_{batch_name}", use_container_width=True):
+                    shutil.rmtree(bdir, ignore_errors=True)
+                    st.rerun()
+            if resume_clicked:
+                dl_execute_batch(bdir, m)
+            if m.get("last_failed"):
+                with st.expander(f"⚠️ {len(m['last_failed'])} video(s) failed last run — details"):
+                    for vid_id, err in m["last_failed"]:
+                        st.markdown(f"**{vid_id}**: {err}")
+        st.markdown("---")
+
+    # ---- Ready ZIPs (persistent — the download link never dies on rerun) ----
+    dl_ready_zips = []
+    if os.path.isdir(DL_ROOT):
+        dl_ready_zips = sorted(
+            (f for f in os.listdir(DL_ROOT) if f.endswith(".zip")),
+            reverse=True,
+        )
+    if dl_ready_zips:
+        st.markdown("### 📦 Ready ZIPs")
+        for zip_name in dl_ready_zips:
+            zip_path = os.path.join(DL_ROOT, zip_name)
+            try:
+                size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+            except OSError:
+                continue
+            z1, z2 = st.columns([4, 1])
+            with z1:
+                with open(zip_path, "rb") as fzip:
+                    st.download_button(
+                        label=f"⬇️ {zip_name} ({size_mb:.0f} MB)",
+                        data=fzip,
+                        file_name=zip_name,
+                        mime="application/zip",
+                        key=f"zipdl_{zip_name}",
+                        use_container_width=True,
+                    )
+            with z2:
+                if st.button("🗑️ Delete", key=f"zipdel_{zip_name}", use_container_width=True):
+                    try:
+                        os.unlink(zip_path)
+                    except Exception:
+                        pass
+                    st.rerun()
+        st.markdown("---")
 
     # ---- UI state ----
     if "dl_videos" not in st.session_state:
@@ -301,58 +493,38 @@ with tab1:
         selected_count = len(st.session_state.dl_selected)
         st.info(f"**{selected_count}** video(s) selected")
 
-        if st.button(
-            f"📥 Download {selected_count} Video(s) as ZIP",
-            disabled=selected_count == 0,
-            use_container_width=True,
-        ):
+        dl_col1, dl_col2 = st.columns([3, 1])
+        with dl_col2:
+            max_workers = st.slider(
+                "⚡ Parallel downloads",
+                min_value=1, max_value=10, value=5,
+                help="How many videos to download at the same time. 5 is a safe default — go higher only if your connection is very fast and TikTok isn't rate-limiting you."
+            )
+
+        with dl_col1:
+            dl_btn = st.button(
+                f"📥 Download {selected_count} Video(s) as ZIP",
+                disabled=selected_count == 0,
+                use_container_width=True,
+            )
+
+        if dl_btn:
             # Pass full video objects so downloader has the real URL
             selected_videos = [
                 v for v in st.session_state.dl_videos
                 if v["id"] in st.session_state.dl_selected
             ]
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                try:
-                    downloaded, failed = download_videos_ytdlp(selected_videos, tmpdir, progress_bar, status_text)
-
-                    if downloaded:
-                        zip_buf = BytesIO()
-                        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                            for fp in downloaded:
-                                zf.write(fp, os.path.basename(fp))
-                        zip_buf.seek(0)
-
-                        progress_bar.progress(1.0)
-                        if failed:
-                            status_text.warning(
-                                f"⚠️ {len(downloaded)}/{selected_count} video(s) downloaded. "
-                                f"{len(failed)} failed: " + ", ".join(f"`{vid_id}`" for vid_id, _ in failed)
-                            )
-                        else:
-                            status_text.success(f"✅ All {len(downloaded)} video(s) ready!")
-
-                        st.download_button(
-                            label=f"⬇️ Download ZIP ({len(downloaded)} videos)",
-                            data=zip_buf,
-                            file_name=f"tiktok_videos_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                            mime="application/zip",
-                        )
-
-                        if failed:
-                            with st.expander(f"⚠️ {len(failed)} video(s) failed — details"):
-                                for vid_id, err in failed:
-                                    st.markdown(f"**{vid_id}**: {err}")
-                    else:
-                        status_text.error("No videos downloaded. Check yt-dlp and the video IDs.")
-                        if failed:
-                            with st.expander("Error details"):
-                                for vid_id, err in failed:
-                                    st.markdown(f"**{vid_id}**: {err}")
-                except Exception as e:
-                    status_text.error(f"Download failed: {e}")
+            # Create a persistent batch on disk — survives sleep / lost connection
+            batch_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            batch_dir = os.path.join(DL_ROOT, batch_id)
+            manifest = {
+                "created": datetime.datetime.now().isoformat(),
+                "videos": selected_videos,
+                "workers": max_workers,
+                "status": "in_progress",
+            }
+            dl_save_manifest(batch_dir, manifest)
+            dl_execute_batch(batch_dir, manifest)
 
 
 # ============================================================
@@ -1461,4 +1633,156 @@ with tab4:
 - Clear screenshots of actual TikTok video frames
 - Product images, faces, or distinctive scenes
 - Images with unique visual elements (not generic landscapes)
+        """)
+
+
+# ============================================================
+# TAB 5 — Extract Audio from Videos
+# ============================================================
+with tab5:
+    st.header("🎵 Extract Audio from Videos")
+    st.markdown("Upload one or more videos and get their audio tracks — as MP3, WAV, or original quality M4A.")
+
+    # ---- Options ----
+    st.subheader("Step 1 — Upload Videos")
+    ea_files = st.file_uploader(
+        "Drop one or more videos",
+        type=["mp4", "mov", "m4v", "avi", "mkv", "webm"],
+        accept_multiple_files=True,
+        key="ea_files",
+    )
+
+    st.subheader("Step 2 — Audio Options")
+    ea_col1, ea_col2 = st.columns(2)
+    with ea_col1:
+        ea_format = st.selectbox(
+            "Output format",
+            ["MP3 (universal)", "M4A (fast — original quality)", "WAV (uncompressed)"],
+            help="MP3 works everywhere. M4A copies the original audio without re-encoding (fastest, best quality). WAV is huge but lossless.",
+        )
+    with ea_col2:
+        ea_bitrate = st.select_slider(
+            "MP3 bitrate (kbps)",
+            options=[128, 160, 192, 256, 320],
+            value=192,
+            disabled=not ea_format.startswith("MP3"),
+        )
+
+    def ea_build_cmd(in_path, out_path):
+        base = [FFMPEG, "-y", "-i", in_path, "-vn"]
+        if ea_format.startswith("MP3"):
+            return base + ["-c:a", "libmp3lame", "-b:a", f"{ea_bitrate}k", out_path]
+        if ea_format.startswith("M4A"):
+            return base + ["-c:a", "copy", out_path]
+        return base + ["-c:a", "pcm_s16le", "-ar", "44100", out_path]
+
+    def ea_extract_one(in_path, out_path):
+        """Extract audio. For M4A, fall back to AAC re-encode if stream copy fails
+        (e.g. source audio isn't AAC)."""
+        try:
+            r = subprocess.run(ea_build_cmd(in_path, out_path), capture_output=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            return False, "timed out after 300s"
+        if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return True, None
+        if ea_format.startswith("M4A"):
+            cmd = [FFMPEG, "-y", "-i", in_path, "-vn", "-c:a", "aac", "-b:a", "192k", out_path]
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=300)
+            except subprocess.TimeoutExpired:
+                return False, "timed out after 300s"
+            if r.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                return True, None
+        err = r.stderr.decode(errors="replace")[-300:] if r.stderr else "unknown error"
+        return False, err
+
+    st.subheader("Step 3 — Extract")
+    ea_go = st.button(
+        f"🎵 Extract Audio from {len(ea_files) if ea_files else 0} Video(s)",
+        use_container_width=True,
+        disabled=not ea_files,
+    )
+
+    if ea_go and ea_files:
+        ea_ext = "mp3" if ea_format.startswith("MP3") else ("m4a" if ea_format.startswith("M4A") else "wav")
+        ea_results = []
+        ea_failed = []
+        ea_progress = st.progress(0)
+        ea_status = st.empty()
+        total = len(ea_files)
+
+        with tempfile.TemporaryDirectory() as ea_tmpdir:
+            for idx, ea_file in enumerate(ea_files):
+                ea_status.markdown(f"🎵 Extracting **{idx+1}/{total}** — `{ea_file.name}`")
+
+                in_path = os.path.join(ea_tmpdir, f"in_{idx}_{ea_file.name}")
+                with open(in_path, "wb") as f:
+                    f.write(ea_file.getbuffer())
+
+                base_name = os.path.splitext(os.path.basename(ea_file.name))[0]
+                out_path = os.path.join(ea_tmpdir, f"{base_name}.{ea_ext}")
+
+                ok, err = ea_extract_one(in_path, out_path)
+                if ok:
+                    with open(out_path, "rb") as f:
+                        ea_results.append({"name": f"{base_name}.{ea_ext}", "data": f.read()})
+                else:
+                    ea_failed.append((ea_file.name, err))
+
+                try:
+                    os.unlink(in_path)
+                except Exception:
+                    pass
+                ea_progress.progress((idx + 1) / total)
+
+        if ea_results:
+            if ea_failed:
+                ea_status.warning(f"⚠️ {len(ea_results)}/{total} extracted — {len(ea_failed)} failed.")
+            else:
+                ea_status.success(f"✅ All {len(ea_results)} audio file(s) extracted!")
+
+            if len(ea_results) == 1:
+                st.download_button(
+                    label=f"⬇️ Download {ea_results[0]['name']}",
+                    data=ea_results[0]["data"],
+                    file_name=ea_results[0]["name"],
+                    mime="audio/mpeg" if ea_ext == "mp3" else ("audio/mp4" if ea_ext == "m4a" else "audio/wav"),
+                    key="ea_dl_single",
+                    use_container_width=True,
+                )
+            else:
+                ea_zip = BytesIO()
+                with zipfile.ZipFile(ea_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for r in ea_results:
+                        zf.writestr(r["name"], r["data"])
+                ea_zip.seek(0)
+                st.download_button(
+                    label=f"⬇️ Download ZIP ({len(ea_results)} audio files)",
+                    data=ea_zip,
+                    file_name=f"audio_extracted_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    key="ea_dl_zip",
+                    use_container_width=True,
+                )
+
+            if ea_failed:
+                with st.expander(f"⚠️ {len(ea_failed)} file(s) failed — details"):
+                    for fname, err in ea_failed:
+                        st.markdown(f"**{fname}**: {err}")
+        else:
+            ea_status.error("No audio could be extracted.")
+            if ea_failed:
+                with st.expander("Error details"):
+                    for fname, err in ea_failed:
+                        st.markdown(f"**{fname}**: {err}")
+
+    elif not ea_files:
+        st.info("Upload videos above, then click **Extract Audio**.")
+        st.markdown("""
+**Format guide:**
+| Format | Best for | Speed | Size |
+|---|---|---|---|
+| MP3 | Sharing, editing apps, everywhere | Fast | Small |
+| M4A | Keeping original TikTok audio quality (no re-encode) | Fastest | Small |
+| WAV | Audio editing / production | Fast | Very large |
         """)
