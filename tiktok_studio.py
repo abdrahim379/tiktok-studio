@@ -56,10 +56,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🎬 TikTok Studio")
-st.markdown("**Four tools in one app** — Download videos, generate variants, refresh metadata, or find similar content")
+st.markdown("**All your content tools in one app** — download videos, generate variants, refresh metadata, find similar content, extract audio & text, and clean up your designs")
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📥 TikTok Downloader", "🎛️ Variant Generator", "🔄 Refresh Metadata", "🔍 Find Similar", "🎵 Extract Audio", "📝 Extract Text"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📥 TikTok Downloader", "🎛️ Variant Generator", "🔄 Refresh Metadata", "🔍 Find Similar", "🎵 Extract Audio", "📝 Extract Text", "🎨 Design Studio"])
 
 
 # ============================================================
@@ -1957,3 +1957,332 @@ with tab6:
                 )
         elif not et_files:
             st.info("Upload videos above, choose the language, then click **Extract Text**.")
+
+
+# ============================================================
+# TAB 7 — Design Studio (remove background + upscale / enhance)
+# ============================================================
+with tab7:
+    st.header("🎨 Design Studio")
+    st.markdown(
+        "Clean up your designs: **remove the background** and **boost resolution & sharpness** "
+        "for print-ready or high-quality export."
+    )
+
+    try:
+        from PIL import Image, ImageFilter, ImageEnhance, ImageOps
+        import numpy as np
+        _ds_ok = True
+    except ImportError:
+        _ds_ok = False
+
+    # Optional AI cutout engine (best for photos / hair / complex edges)
+    try:
+        from rembg import remove as _rembg_remove, new_session as _rembg_session
+        _ds_ai = True
+    except Exception:
+        _ds_ai = False
+
+    if not _ds_ok:
+        st.error("Image tools aren't installed yet. Run this in Terminal, then restart the app:")
+        st.code("pip install pillow numpy", language="bash")
+    else:
+        DS_MAX_PIXELS = 40_000_000   # ~40 MP output ceiling, keeps memory sane
+
+        # ── Helpers ─────────────────────────────────────────
+        @st.cache_resource(show_spinner=False)
+        def ds_ai_session(model_name):
+            return _rembg_session(model_name)
+
+        def ds_load(file_bytes):
+            img = Image.open(BytesIO(file_bytes))
+            img = ImageOps.exif_transpose(img)      # honour phone rotation
+            return img.convert("RGBA")
+
+        def ds_edge_color(arr):
+            """Median colour of the 1px border — the presumed background."""
+            border = np.concatenate([
+                arr[0, :, :3], arr[-1, :, :3],
+                arr[:, 0, :3], arr[:, -1, :3],
+            ]).astype(np.int16)
+            return np.median(border, axis=0)
+
+        def ds_remove_bg_colorkey(img, tolerance, feather, shrink):
+            """
+            Fast colour-key cutout. Ideal for logos, mockups and flat designs
+            sitting on a solid or near-solid background.
+            """
+            arr = np.array(img)
+            bg = ds_edge_color(arr)
+            dist = np.sqrt(((arr[:, :, :3].astype(np.int16) - bg) ** 2).sum(axis=2))
+            # tolerance 0-100 -> distance threshold 0-255 (in RGB space)
+            thr = max(1.0, tolerance / 100.0 * 255.0)
+            # soft ramp instead of a hard cut, so edges don't look chewed
+            alpha = np.clip((dist - thr * 0.55) / (thr * 0.45), 0.0, 1.0)
+            alpha = (alpha * 255).astype(np.uint8)
+            alpha = np.minimum(alpha, arr[:, :, 3])   # respect existing transparency
+
+            a_img = Image.fromarray(alpha, mode="L")
+            if shrink > 0:
+                a_img = a_img.filter(ImageFilter.MinFilter(3 if shrink == 1 else 5))
+            if feather > 0:
+                a_img = a_img.filter(ImageFilter.GaussianBlur(feather))
+
+            out = img.copy()
+            out.putalpha(a_img)
+            return out
+
+        def ds_remove_bg_ai(img, model_name, alpha_matting):
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            kwargs = {"session": ds_ai_session(model_name)}
+            if alpha_matting:
+                kwargs.update(
+                    alpha_matting=True,
+                    alpha_matting_foreground_threshold=240,
+                    alpha_matting_background_threshold=10,
+                    alpha_matting_erode_size=10,
+                )
+            return Image.open(BytesIO(_rembg_remove(buf.getvalue(), **kwargs))).convert("RGBA")
+
+        def ds_composite(img_rgba, bg_mode, bg_hex):
+            """Put the cutout on a background (or keep it transparent)."""
+            if bg_mode == "Transparent (PNG)":
+                return img_rgba
+            if bg_mode == "White":
+                bg_hex = "#FFFFFF"
+            elif bg_mode == "Black":
+                bg_hex = "#000000"
+            base = Image.new("RGBA", img_rgba.size, bg_hex)
+            return Image.alpha_composite(base, img_rgba)
+
+        def ds_upscale(img, target_w, sharpen_pct, denoise, contrast, saturation):
+            """Progressive Lanczos upscale + unsharp masking."""
+            w, h = img.size
+            if target_w and target_w != w:
+                ratio = target_w / float(w)
+                nw, nh = int(round(w * ratio)), int(round(h * ratio))
+                if nw * nh > DS_MAX_PIXELS:
+                    scale = (DS_MAX_PIXELS / float(nw * nh)) ** 0.5
+                    nw, nh = max(1, int(nw * scale)), max(1, int(nh * scale))
+                # step up in 2x hops — much cleaner than one giant jump
+                cw, ch = w, h
+                while cw * 2 <= nw and ch * 2 <= nh:
+                    cw, ch = cw * 2, ch * 2
+                    img = img.resize((cw, ch), Image.LANCZOS)
+                if (cw, ch) != (nw, nh):
+                    img = img.resize((nw, nh), Image.LANCZOS)
+
+            if denoise:
+                img = img.filter(ImageFilter.SMOOTH)
+            if sharpen_pct > 0:
+                img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=int(sharpen_pct), threshold=3))
+            if abs(contrast - 1.0) > 0.01:
+                img = ImageEnhance.Contrast(img).enhance(contrast)
+            if abs(saturation - 1.0) > 0.01:
+                img = ImageEnhance.Color(img).enhance(saturation)
+            return img
+
+        def ds_encode(img, fmt, quality):
+            buf = BytesIO()
+            if fmt == "PNG":
+                img.save(buf, format="PNG", optimize=True)
+                return buf.getvalue(), "png", "image/png"
+            if fmt == "WEBP":
+                img.save(buf, format="WEBP", quality=quality, method=6)
+                return buf.getvalue(), "webp", "image/webp"
+            # JPG has no alpha — flatten onto white
+            flat = Image.new("RGB", img.size, "#FFFFFF")
+            flat.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+            flat.save(buf, format="JPEG", quality=quality, subsampling=0, optimize=True)
+            return buf.getvalue(), "jpg", "image/jpeg"
+
+        # ── Step 1 — upload ─────────────────────────────────
+        st.subheader("Step 1 — Upload Designs")
+        ds_files = st.file_uploader(
+            "Drop one or more images (PNG, JPG, WEBP…)",
+            type=["png", "jpg", "jpeg", "webp", "bmp", "tiff"],
+            accept_multiple_files=True,
+            key="ds_files",
+        )
+
+        # ── Step 2 — what to do ─────────────────────────────
+        st.subheader("Step 2 — What do you want to do?")
+        ds_do_bg = st.checkbox("🧽 Remove the background", value=True, key="ds_do_bg")
+        ds_do_up = st.checkbox("🔍 Increase quality & resolution", value=True, key="ds_do_up")
+
+        if ds_do_bg:
+            st.markdown("**Background removal**")
+            engine_opts = ["Flat background (fast — logos, mockups, flat designs)"]
+            if _ds_ai:
+                engine_opts.insert(0, "AI cutout (best — photos, people, complex edges)")
+            ds_engine = st.selectbox("Method", engine_opts, key="ds_engine")
+
+            if ds_engine.startswith("AI"):
+                ds_c1, ds_c2 = st.columns(2)
+                with ds_c1:
+                    ds_model = st.selectbox(
+                        "Model",
+                        ["u2net", "isnet-general-use", "u2netp", "silueta"],
+                        help="u2net = balanced • isnet = sharpest edges • u2netp/silueta = lighter & faster",
+                        key="ds_model",
+                    )
+                with ds_c2:
+                    ds_matting = st.checkbox(
+                        "Refine edges (alpha matting)", value=False,
+                        help="Much better on hair and soft edges. Noticeably slower.",
+                        key="ds_matting",
+                    )
+                ds_tol = ds_feather = ds_shrink = 0
+            else:
+                if not _ds_ai:
+                    st.caption(
+                        "💡 Want AI-quality cutouts for photos and people? Install the engine "
+                        "with `pip install rembg` and restart the app — a new option appears here."
+                    )
+                ds_b1, ds_b2, ds_b3 = st.columns(3)
+                with ds_b1:
+                    ds_tol = st.slider("Tolerance", 1, 60, 18, key="ds_tol",
+                                       help="How different from the background a pixel must be to be kept. Raise it if bits of background survive.")
+                with ds_b2:
+                    ds_feather = st.slider("Edge softness", 0.0, 3.0, 0.6, 0.1, key="ds_feather")
+                with ds_b3:
+                    ds_shrink = st.select_slider("Trim halo", options=[0, 1, 2], value=1, key="ds_shrink",
+                                                 help="Shaves the leftover background fringe around the edge.")
+                ds_model, ds_matting = "u2net", False
+
+            ds_bg_mode = st.radio(
+                "New background",
+                ["Transparent (PNG)", "White", "Black", "Custom colour"],
+                horizontal=True, key="ds_bg_mode",
+            )
+            ds_bg_hex = st.color_picker("Pick a colour", "#FFFFFF", key="ds_bg_hex") \
+                if ds_bg_mode == "Custom colour" else "#FFFFFF"
+        else:
+            ds_engine, ds_model, ds_matting = "", "u2net", False
+            ds_tol, ds_feather, ds_shrink = 18, 0.6, 1
+            ds_bg_mode, ds_bg_hex = "Transparent (PNG)", "#FFFFFF"
+
+        if ds_do_up:
+            st.markdown("**Quality & resolution**")
+            ds_u1, ds_u2 = st.columns(2)
+            with ds_u1:
+                ds_scale_mode = st.radio("Resize by", ["Multiplier", "Exact width"],
+                                         horizontal=True, key="ds_scale_mode")
+                if ds_scale_mode == "Multiplier":
+                    ds_mult = st.select_slider("Scale", options=[1, 2, 3, 4, 6, 8], value=2, key="ds_mult")
+                    ds_target_w = 0
+                else:
+                    ds_target_w = st.number_input("Target width (px)", 100, 12000, 2048, 64, key="ds_target_w")
+                    ds_mult = 1
+            with ds_u2:
+                ds_sharpen = st.slider("Sharpening", 0, 250, 110, 10, key="ds_sharpen",
+                                       help="Counteracts the softness that any upscale introduces.")
+                ds_denoise = st.checkbox("Smooth out noise / JPEG artefacts", value=False, key="ds_denoise")
+
+            ds_e1, ds_e2 = st.columns(2)
+            with ds_e1:
+                ds_contrast = st.slider("Contrast", 0.5, 2.0, 1.0, 0.05, key="ds_contrast")
+            with ds_e2:
+                ds_saturation = st.slider("Colour punch", 0.0, 2.0, 1.0, 0.05, key="ds_saturation")
+        else:
+            ds_scale_mode, ds_mult, ds_target_w = "Multiplier", 1, 0
+            ds_sharpen, ds_denoise, ds_contrast, ds_saturation = 0, False, 1.0, 1.0
+
+        # ── Step 3 — output ─────────────────────────────────
+        st.subheader("Step 3 — Output")
+        ds_o1, ds_o2 = st.columns(2)
+        with ds_o1:
+            _fmt_default = 0 if (ds_do_bg and ds_bg_mode == "Transparent (PNG)") else 0
+            ds_fmt = st.selectbox("Format", ["PNG", "JPG", "WEBP"], index=_fmt_default, key="ds_fmt",
+                                  help="PNG and WEBP keep transparency. JPG does not.")
+        with ds_o2:
+            ds_quality = st.slider("Quality (JPG / WEBP)", 60, 100, 95, key="ds_quality",
+                                   disabled=(ds_fmt == "PNG"))
+
+        if ds_do_bg and ds_bg_mode == "Transparent (PNG)" and ds_fmt == "JPG":
+            st.warning("JPG can't store transparency — the cut-out background will come out white.")
+
+        # ── Run ─────────────────────────────────────────────
+        if st.button("✨ Process Designs", type="primary", use_container_width=True,
+                     disabled=not ds_files, key="ds_run"):
+            if not ds_do_bg and not ds_do_up:
+                st.warning("Pick at least one thing to do — remove the background, boost quality, or both.")
+            else:
+                results, prog, status = [], st.progress(0.0), st.empty()
+                for i, f in enumerate(ds_files):
+                    status.info(f"Processing **{f.name}** ({i + 1}/{len(ds_files)})…")
+                    try:
+                        original = ds_load(f.getvalue())
+                        img = original
+
+                        if ds_do_bg:
+                            if ds_engine.startswith("AI"):
+                                img = ds_remove_bg_ai(img, ds_model, ds_matting)
+                            else:
+                                img = ds_remove_bg_colorkey(img, ds_tol, ds_feather, ds_shrink)
+                            img = ds_composite(img, ds_bg_mode, ds_bg_hex)
+
+                        if ds_do_up:
+                            tw = ds_target_w if ds_scale_mode == "Exact width" else img.width * ds_mult
+                            img = ds_upscale(img, tw, ds_sharpen, ds_denoise, ds_contrast, ds_saturation)
+
+                        data, ext, mime = ds_encode(img, ds_fmt, ds_quality)
+                        results.append({
+                            "name": f.name, "error": None, "data": data, "ext": ext, "mime": mime,
+                            "before": f"{original.width}×{original.height}",
+                            "after": f"{img.width}×{img.height}",
+                            "size_kb": len(data) / 1024,
+                            "preview": data,
+                        })
+                    except Exception as e:
+                        results.append({"name": f.name, "error": str(e)})
+                    prog.progress((i + 1) / len(ds_files))
+
+                status.empty()
+                prog.empty()
+                st.session_state.ds_results = results
+
+        # ── Results ─────────────────────────────────────────
+        if st.session_state.get("ds_results"):
+            ok = [r for r in st.session_state.ds_results if not r["error"]]
+            bad = [r for r in st.session_state.ds_results if r["error"]]
+
+            if ok:
+                st.success(f"✅ Done — {len(ok)} image(s) processed.")
+            for r in bad:
+                st.error(f"❌ {r['name']} — {r['error']}")
+
+            for i, r in enumerate(ok):
+                st.markdown("---")
+                st.markdown(f"**{r['name']}** — {r['before']} → **{r['after']}** · {r['size_kb']:.0f} KB")
+                pc1, pc2 = st.columns([3, 1])
+                with pc1:
+                    st.image(r["preview"], use_container_width=True)
+                with pc2:
+                    base = os.path.splitext(r["name"])[0]
+                    st.download_button(
+                        "⬇️ Download",
+                        data=r["data"],
+                        file_name=f"{base}_studio.{r['ext']}",
+                        mime=r["mime"],
+                        key=f"ds_dl_{i}",
+                        use_container_width=True,
+                    )
+
+            if len(ok) > 1:
+                zip_buf = BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for r in ok:
+                        zf.writestr(f"{os.path.splitext(r['name'])[0]}_studio.{r['ext']}", r["data"])
+                st.markdown("---")
+                st.download_button(
+                    f"📦 Download ALL as ZIP ({len(ok)} images)",
+                    data=zip_buf.getvalue(),
+                    file_name=f"designs_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    key="ds_dl_zip",
+                    use_container_width=True,
+                )
+        elif not ds_files:
+            st.info("Upload your designs above, choose what to do, then click **Process Designs**.")
