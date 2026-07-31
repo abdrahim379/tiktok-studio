@@ -2000,35 +2000,103 @@ with tab7:
             return img.convert("RGBA")
 
         def ds_edge_color(arr):
-            """Median colour of the 1px border — the presumed background."""
+            """Dominant colour of the border band — the presumed background."""
+            band = max(2, min(arr.shape[0], arr.shape[1]) // 100)
             border = np.concatenate([
-                arr[0, :, :3], arr[-1, :, :3],
-                arr[:, 0, :3], arr[:, -1, :3],
-            ]).astype(np.int16)
-            return np.median(border, axis=0)
+                arr[:band, :, :3].reshape(-1, 3), arr[-band:, :, :3].reshape(-1, 3),
+                arr[:, :band, :3].reshape(-1, 3), arr[:, -band:, :3].reshape(-1, 3),
+            ]).astype(np.float32)
+            med = np.median(border, axis=0)
+            # re-average over the pixels that actually agree with the median,
+            # so a stray object touching the frame can't drag the key colour off
+            keep = np.sqrt(((border - med) ** 2).sum(axis=1)) < 40
+            return border[keep].mean(axis=0) if keep.sum() > 16 else med
 
-        def ds_remove_bg_colorkey(img, tolerance, feather, shrink):
+        def ds_edge_connected(close, max_dim=256):
             """
-            Fast colour-key cutout. Ideal for logos, mockups and flat designs
-            sitting on a solid or near-solid background.
+            Which background-coloured pixels actually touch the border?
+            Flood-fills a coarse copy of the mask so the design's interior
+            (white text, light panels…) never gets punched out.
             """
-            arr = np.array(img)
-            bg = ds_edge_color(arr)
-            dist = np.sqrt(((arr[:, :, :3].astype(np.int16) - bg) ** 2).sum(axis=2))
-            # tolerance 0-100 -> distance threshold 0-255 (in RGB space)
+            h, w = close.shape
+            step = max(1, int(np.ceil(max(h, w) / float(max_dim))))
+            if step > 1:
+                # BOX downscale = "any pixel in this block was background",
+                # which keeps thin background channels connected
+                small = np.array(
+                    Image.fromarray((close * 255).astype(np.uint8)).resize(
+                        (max(1, w // step), max(1, h // step)), Image.BOX
+                    )
+                ) > 0
+            else:
+                small = close.copy()
+
+            reach = np.zeros_like(small)
+            reach[0, :] = small[0, :]
+            reach[-1, :] = small[-1, :]
+            reach[:, 0] = small[:, 0]
+            reach[:, -1] = small[:, -1]
+            for _ in range(small.shape[0] + small.shape[1]):
+                grown = reach.copy()
+                grown[1:, :] |= reach[:-1, :]
+                grown[:-1, :] |= reach[1:, :]
+                grown[:, 1:] |= reach[:, :-1]
+                grown[:, :-1] |= reach[:, 1:]
+                grown &= small
+                if np.array_equal(grown, reach):
+                    break
+                reach = grown
+
+            if step > 1:
+                reach = np.array(
+                    Image.fromarray((reach * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)
+                ) > 0
+            return reach & close
+
+        def ds_remove_bg_colorkey(img, tolerance, feather, shrink,
+                                  decontaminate=True, protect_interior=True):
+            """
+            Colour-key cutout for logos, mockups and flat designs.
+
+            Two things make the edge clean rather than fringed:
+              * interior protection — only background *connected to the frame*
+                is removed, so raising the tolerance can't punch holes;
+              * colour decontamination — a half-transparent edge pixel is
+                C = a*F + (1-a)*B, so it still carries the old background's
+                colour. We solve back for F, which is what kills the green/
+                grey halo left around a cut-out design.
+            """
+            arr = np.array(img).astype(np.float32)
+            rgb, orig_a = arr[:, :, :3], arr[:, :, 3]
+            bg = ds_edge_color(np.array(img))
+
+            dist = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
             thr = max(1.0, tolerance / 100.0 * 255.0)
-            # soft ramp instead of a hard cut, so edges don't look chewed
-            alpha = np.clip((dist - thr * 0.55) / (thr * 0.45), 0.0, 1.0)
-            alpha = (alpha * 255).astype(np.uint8)
-            alpha = np.minimum(alpha, arr[:, :, 3])   # respect existing transparency
 
-            a_img = Image.fromarray(alpha, mode="L")
+            if protect_interior:
+                # anything within the threshold is a background *candidate*
+                reachable = ds_edge_connected(dist <= thr)
+                # push unreachable candidates far away so they stay opaque
+                dist = np.where(reachable, dist, np.maximum(dist, thr * 1.5))
+
+            # wide soft ramp: more edge pixels land in the partial-alpha band,
+            # and every one of those gets decontaminated below
+            alpha = np.clip((dist - thr * 0.35) / (thr * 0.65), 0.0, 1.0)
+
+            if decontaminate:
+                a3 = alpha[:, :, None]
+                # clamp the divisor so near-invisible pixels can't amplify noise
+                fg = (rgb - (1.0 - a3) * bg) / np.maximum(a3, 0.25)
+                rgb = np.where(a3 < 0.995, np.clip(fg, 0.0, 255.0), rgb)
+
+            a8 = np.minimum((alpha * 255).astype(np.uint8), orig_a.astype(np.uint8))
+            a_img = Image.fromarray(a8, mode="L")
             if shrink > 0:
-                a_img = a_img.filter(ImageFilter.MinFilter(3 if shrink == 1 else 5))
+                a_img = a_img.filter(ImageFilter.MinFilter(min(9, 3 + 2 * (shrink - 1))))
             if feather > 0:
                 a_img = a_img.filter(ImageFilter.GaussianBlur(feather))
 
-            out = img.copy()
+            out = Image.fromarray(rgb.astype(np.uint8), mode="RGB").convert("RGBA")
             out.putalpha(a_img)
             return out
 
@@ -2134,21 +2202,55 @@ with tab7:
                         key="ds_matting",
                     )
                 ds_tol = ds_feather = ds_shrink = 0
+                ds_decon = ds_protect = False
             else:
                 if not _ds_ai:
                     st.caption(
                         "💡 Want AI-quality cutouts for photos and people? Install the engine "
                         "with `pip install rembg` and restart the app — a new option appears here."
                     )
-                ds_b1, ds_b2, ds_b3 = st.columns(3)
-                with ds_b1:
-                    ds_tol = st.slider("Tolerance", 1, 60, 18, key="ds_tol",
-                                       help="How different from the background a pixel must be to be kept. Raise it if bits of background survive.")
-                with ds_b2:
-                    ds_feather = st.slider("Edge softness", 0.0, 3.0, 0.6, 0.1, key="ds_feather")
-                with ds_b3:
-                    ds_shrink = st.select_slider("Trim halo", options=[0, 1, 2], value=1, key="ds_shrink",
-                                                 help="Shaves the leftover background fringe around the edge.")
+                # Presets first — "Strong" is the default so a clean cut-out
+                # is what you get without touching a single slider.
+                DS_PRESETS = {
+                    "Gentle":   (14, 0.4, 0),
+                    "Balanced": (24, 0.6, 1),
+                    "Strong (recommended)": (36, 0.8, 2),
+                    "Maximum":  (52, 1.0, 3),
+                }
+                ds_preset = st.select_slider(
+                    "Cleanup strength",
+                    options=list(DS_PRESETS.keys()) + ["Custom"],
+                    value="Strong (recommended)",
+                    key="ds_preset",
+                    help="Start at Strong. Go up to Maximum if any background survives; "
+                         "drop to Balanced/Gentle if the design itself gets eaten.",
+                )
+                if ds_preset == "Custom":
+                    ds_b1, ds_b2, ds_b3 = st.columns(3)
+                    with ds_b1:
+                        ds_tol = st.slider("Tolerance", 1, 80, 36, key="ds_tol",
+                                           help="How different from the background a pixel must be to be kept. Raise it if bits of background survive.")
+                    with ds_b2:
+                        ds_feather = st.slider("Edge softness", 0.0, 3.0, 0.8, 0.1, key="ds_feather")
+                    with ds_b3:
+                        ds_shrink = st.select_slider("Trim halo", options=[0, 1, 2, 3], value=2, key="ds_shrink",
+                                                     help="Shaves the leftover background fringe around the edge.")
+                else:
+                    ds_tol, ds_feather, ds_shrink = DS_PRESETS[ds_preset]
+
+                ds_q1, ds_q2 = st.columns(2)
+                with ds_q1:
+                    ds_decon = st.checkbox(
+                        "🎯 Kill colour fringe", value=True, key="ds_decon",
+                        help="Un-blends the old background out of the semi-transparent edge "
+                             "pixels. This is what removes the green/grey outline around a cut-out.",
+                    )
+                with ds_q2:
+                    ds_protect = st.checkbox(
+                        "🛡️ Protect design interior", value=True, key="ds_protect",
+                        help="Only removes background that touches the edge of the image, so a "
+                             "high strength can't punch holes through light areas of your design.",
+                    )
                 ds_model, ds_matting = "u2net", False
 
             ds_bg_mode = st.radio(
@@ -2160,7 +2262,8 @@ with tab7:
                 if ds_bg_mode == "Custom colour" else "#FFFFFF"
         else:
             ds_engine, ds_model, ds_matting = "", "u2net", False
-            ds_tol, ds_feather, ds_shrink = 18, 0.6, 1
+            ds_tol, ds_feather, ds_shrink = 36, 0.8, 2
+            ds_decon, ds_protect = True, True
             ds_bg_mode, ds_bg_hex = "Transparent (PNG)", "#FFFFFF"
 
         if ds_do_up:
@@ -2220,12 +2323,20 @@ with tab7:
                             if ds_engine.startswith("AI"):
                                 img = ds_remove_bg_ai(img, ds_model, ds_matting)
                             else:
-                                img = ds_remove_bg_colorkey(img, ds_tol, ds_feather, ds_shrink)
+                                img = ds_remove_bg_colorkey(
+                                    img, ds_tol, ds_feather, ds_shrink,
+                                    decontaminate=ds_decon, protect_interior=ds_protect,
+                                )
                             img = ds_composite(img, ds_bg_mode, ds_bg_hex)
 
                         if ds_do_up:
                             tw = ds_target_w if ds_scale_mode == "Exact width" else img.width * ds_mult
                             img = ds_upscale(img, tw, ds_sharpen, ds_denoise, ds_contrast, ds_saturation)
+
+                        # sanity check: a colour-key on a photo wipes everything
+                        kept = None
+                        if ds_do_bg and not ds_engine.startswith("AI") and img.mode == "RGBA":
+                            kept = float((np.array(img)[:, :, 3] > 128).mean() * 100.0)
 
                         data, ext, mime = ds_encode(img, ds_fmt, ds_quality)
                         results.append({
@@ -2233,6 +2344,7 @@ with tab7:
                             "before": f"{original.width}×{original.height}",
                             "after": f"{img.width}×{img.height}",
                             "size_kb": len(data) / 1024,
+                            "kept": kept,
                             "preview": data,
                         })
                     except Exception as e:
@@ -2256,6 +2368,12 @@ with tab7:
             for i, r in enumerate(ok):
                 st.markdown("---")
                 st.markdown(f"**{r['name']}** — {r['before']} → **{r['after']}** · {r['size_kb']:.0f} KB")
+                if r.get("kept") is not None and r["kept"] < 8:
+                    st.warning(
+                        f"Only {r['kept']:.0f}% of this image survived — it probably doesn't have a "
+                        "flat background. Lower the **Cleanup strength**, or use the **AI cutout** "
+                        "method (`pip install rembg`) which handles photos properly."
+                    )
                 pc1, pc2 = st.columns([3, 1])
                 with pc1:
                     st.image(r["preview"], use_container_width=True)
