@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import subprocess, os, datetime, tempfile, json, re, time, random, uuid
-import zipfile, io, traceback, requests, threading, shutil
+import zipfile, io, traceback, requests, threading, shutil, hashlib
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -32,34 +32,275 @@ FFPROBE = _find_bin("ffprobe")
 st.set_page_config(
     page_title="TikTok Studio",
     page_icon="🎬",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
+# ── Brand system ────────────────────────────────────────────────────────
+# Duotone: TikTok cyan (#25F4EE) + magenta (#FE2C55) on a near-black base.
+# Cyan carries interaction (focus, hover, progress), magenta carries
+# identity and primary actions; everything else stays neutral so the two
+# accents never compete.
 st.markdown("""
 <style>
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        padding: 0 24px;
-        background-color: #1a1a1a;
-        border-radius: 10px 10px 0 0;
-        color: white;
-        font-weight: 600;
-        font-size: 16px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #ee0a78 !important;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root{
+  --ts-bg:#08090D; --ts-surface:#12141C; --ts-surface2:#191C26;
+  --ts-border:#262A38; --ts-border-lit:#333949;
+  --ts-text:#ECEEF4; --ts-muted:#8A91A6;
+  --ts-cyan:#25F4EE; --ts-pink:#FE2C55;
+  --ts-grad:linear-gradient(120deg,#25F4EE 0%,#48C6EF 42%,#FE2C55 100%);
+  --ts-font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+  --ts-r:14px;
+}
+
+.stApp{background:var(--ts-bg);}
+html,body,.stApp,[class*="css"]{font-family:var(--ts-font)!important;color:var(--ts-text);}
+[data-testid="stHeader"]{background:transparent;}
+[data-testid="stDecoration"]{background:var(--ts-grad);height:3px;}
+.block-container{padding-top:2.2rem;max-width:1500px;}
+
+/* ── Hero ─────────────────────────────────────────────── */
+.ts-hero{display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+  padding:26px 30px;margin-bottom:20px;border-radius:20px;
+  background:radial-gradient(1200px 240px at 0% 0%,rgba(37,244,238,.10),transparent 60%),
+             radial-gradient(900px 240px at 100% 100%,rgba(254,44,85,.12),transparent 60%),
+             var(--ts-surface);
+  border:1px solid var(--ts-border);}
+.ts-mark{width:56px;height:56px;flex:0 0 56px;border-radius:17px;display:grid;place-items:center;
+  font-size:28px;background:var(--ts-grad);box-shadow:0 8px 26px rgba(254,44,85,.28);}
+.ts-name{font-size:2.05rem;font-weight:800;letter-spacing:-.028em;line-height:1.1;margin:0;}
+.ts-name span{background:var(--ts-grad);-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;}
+.ts-tag{margin:5px 0 0;color:var(--ts-muted);font-size:.95rem;font-weight:450;}
+.ts-tag b{color:var(--ts-text);font-weight:600;}
+.ts-pill{margin-left:auto;padding:7px 15px;border-radius:999px;font-size:.72rem;font-weight:700;
+  letter-spacing:.10em;color:var(--ts-cyan);background:rgba(37,244,238,.09);
+  border:1px solid rgba(37,244,238,.28);white-space:nowrap;}
+
+/* ── Tabs ─────────────────────────────────────────────── */
+.stTabs [data-baseweb="tab-list"]{gap:8px;flex-wrap:wrap;background:transparent;
+  border-bottom:1px solid var(--ts-border);padding-bottom:12px;margin-bottom:8px;}
+.stTabs [data-baseweb="tab"]{height:auto;padding:10px 17px;border-radius:11px;
+  background:var(--ts-surface);border:1px solid var(--ts-border);
+  color:var(--ts-muted)!important;font-weight:600;font-size:.9rem;letter-spacing:-.01em;
+  transition:all .16s ease;}
+.stTabs [data-baseweb="tab"]:hover{background:var(--ts-surface2);color:var(--ts-text)!important;
+  border-color:var(--ts-border-lit);transform:translateY(-1px);}
+.stTabs [aria-selected="true"]{background:var(--ts-grad)!important;border-color:transparent!important;
+  color:#06080C!important;font-weight:700;box-shadow:0 6px 20px rgba(37,244,238,.18);}
+.stTabs [aria-selected="true"] p{color:#06080C!important;font-weight:700;}
+.stTabs [data-baseweb="tab-highlight"],.stTabs [data-baseweb="tab-border"]{display:none;}
+
+/* ── Type ─────────────────────────────────────────────── */
+h1,h2,h3{letter-spacing:-.022em;font-weight:700;}
+h2{font-size:1.55rem;margin-top:.3rem;}
+h3{font-size:1.07rem;color:var(--ts-text);padding-left:12px;position:relative;margin-top:1.5rem;}
+h3::before{content:"";position:absolute;left:0;top:.22em;bottom:.22em;width:3px;
+  border-radius:3px;background:var(--ts-grad);}
+hr{border-color:var(--ts-border);}
+a{color:var(--ts-cyan)!important;}
+
+/* ── Buttons ──────────────────────────────────────────── */
+.stButton>button,.stDownloadButton>button,.stFormSubmitButton>button{
+  border-radius:11px;font-weight:600;font-size:.9rem;padding:.55rem 1.1rem;
+  background:var(--ts-surface2);color:var(--ts-text);border:1px solid var(--ts-border-lit);
+  transition:all .16s ease;}
+.stButton>button:hover,.stDownloadButton>button:hover,.stFormSubmitButton>button:hover{
+  border-color:var(--ts-cyan);color:var(--ts-cyan);transform:translateY(-1px);
+  box-shadow:0 5px 18px rgba(37,244,238,.12);}
+.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{
+  background:var(--ts-grad);color:#06080C;border:none;font-weight:700;
+  box-shadow:0 6px 22px rgba(254,44,85,.26);}
+.stButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover{
+  filter:brightness(1.09);color:#06080C;transform:translateY(-1px);
+  box-shadow:0 9px 30px rgba(254,44,85,.36);}
+.stButton>button:disabled,.stDownloadButton>button:disabled{opacity:.4;transform:none;box-shadow:none;}
+
+/* ── Inputs ───────────────────────────────────────────── */
+.stTextInput input,.stTextArea textarea,.stNumberInput input,
+[data-baseweb="select"]>div,[data-baseweb="input"]{
+  background:var(--ts-surface)!important;border:1px solid var(--ts-border)!important;
+  border-radius:11px!important;color:var(--ts-text)!important;}
+.stTextInput input:focus,.stTextArea textarea:focus,.stNumberInput input:focus{
+  border-color:var(--ts-cyan)!important;box-shadow:0 0 0 3px rgba(37,244,238,.13)!important;}
+[data-baseweb="select"]>div:hover{border-color:var(--ts-border-lit)!important;}
+.stTextArea textarea{font-size:.95rem;line-height:1.65;}
+label,.stMarkdown p{color:var(--ts-text);}
+[data-testid="stWidgetLabel"] p{font-weight:600;font-size:.87rem;color:var(--ts-text);}
+[data-testid="stCaptionContainer"],small{color:var(--ts-muted)!important;}
+
+/* ── Uploader ─────────────────────────────────────────── */
+[data-testid="stFileUploaderDropzone"]{background:var(--ts-surface);
+  border:1.5px dashed var(--ts-border-lit);border-radius:var(--ts-r);transition:all .18s ease;}
+[data-testid="stFileUploaderDropzone"]:hover{border-color:var(--ts-cyan);
+  background:rgba(37,244,238,.035);}
+
+/* ── Slider / progress ────────────────────────────────── */
+.stSlider [data-baseweb="slider"] div[role="slider"]{background:var(--ts-cyan)!important;
+  border:2px solid #06080C!important;box-shadow:0 0 0 4px rgba(37,244,238,.18)!important;}
+.stProgress>div>div>div>div{background:var(--ts-grad);}
+.stProgress>div>div>div{background:var(--ts-surface2);border-radius:999px;}
+
+/* ── Feedback ─────────────────────────────────────────── */
+[data-testid="stAlert"],.stAlert{border-radius:12px;border:1px solid var(--ts-border);
+  border-left-width:3px;background:var(--ts-surface);}
+[data-testid="stExpander"]{border:1px solid var(--ts-border);border-radius:12px;
+  background:var(--ts-surface);overflow:hidden;}
+[data-testid="stExpander"] summary:hover{color:var(--ts-cyan);}
+[data-testid="stMetric"]{background:var(--ts-surface);border:1px solid var(--ts-border);
+  border-radius:12px;padding:14px 16px;}
+[data-testid="stMetricValue"]{background:var(--ts-grad);-webkit-background-clip:text;
+  background-clip:text;-webkit-text-fill-color:transparent;font-weight:800;}
+.stCheckbox,.stRadio{color:var(--ts-text);}
+code{background:var(--ts-surface2)!important;color:var(--ts-cyan)!important;
+  border:1px solid var(--ts-border);border-radius:6px;padding:1px 6px;font-size:.86em;}
+[data-testid="stCodeBlock"] code{border:none;color:var(--ts-text)!important;}
+img{border-radius:10px;}
+audio{width:100%;filter:saturate(1.15);}
+
+/* Arabic scripts read right-to-left on their own */
+.stTextArea textarea{unicode-bidi:plaintext;}
+
+::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar-track{background:var(--ts-bg);}
+::-webkit-scrollbar-thumb{background:var(--ts-border-lit);border-radius:8px;}
+::-webkit-scrollbar-thumb:hover{background:var(--ts-muted);}
+
+@media (max-width:760px){
+  .ts-hero{padding:20px;gap:14px;} .ts-name{font-size:1.6rem;}
+  .ts-pill{margin-left:0;} .block-container{padding-top:1.2rem;}
+}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🎬 TikTok Studio")
-st.markdown("**All your content tools in one app** — download videos, generate variants, refresh metadata, find similar content, extract audio & text, and clean up your designs")
-st.markdown("---")
+def render_hero(title, tagline, tool_count):
+    head, _, tail = title.rpartition(" ")
+    if not head:
+        head, tail = title, ""
+    st.markdown(
+        f'<div class="ts-hero">'
+        f'  <div class="ts-mark">🎬</div>'
+        f'  <div>'
+        f'    <h1 class="ts-name">{head} <span>{tail}</span></h1>'
+        f'    <p class="ts-tag">{tagline}</p>'
+        f'  </div>'
+        f'  <div class="ts-pill">{tool_count} TOOLS</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📥 TikTok Downloader", "🎛️ Variant Generator", "🔄 Refresh Metadata", "🔍 Find Similar", "🎵 Extract Audio", "📝 Extract Text", "🎨 Design Studio"])
+# ── Configuration & admin ───────────────────────────────────────────────
+# Everything the admin can change lives in one JSON file. It holds API keys,
+# so it is gitignored and must never be committed.
+CONFIG_FILE = "studio_config.json"
+
+TOOL_REGISTRY = [
+    ("downloader",   "📥 TikTok Downloader"),
+    ("variants",     "🎛️ Variant Generator"),
+    ("metadata",     "🔄 Refresh Metadata"),
+    ("find_similar", "🔍 Find Similar"),
+    ("audio",        "🎵 Extract Audio"),
+    ("text",         "📝 Extract Text"),
+    ("design",       "🎨 Design Studio"),
+    ("voice",        "🗣️ Saudi Voice"),
+]
+
+def _sha(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def default_config():
+    return {
+        "admin": {"username": "BAHIM", "password_hash": _sha("BAHIM")},
+        "api":   {"groq_api_key": "", "serpapi_key": ""},
+        "params": {
+            "tts_model":         "canopylabs/orpheus-arabic-saudi",
+            "tts_default_voice": "fahad",
+            "tts_chunk_chars":   550,
+            "tts_gap_ms":        140,
+            "meta_days_back":    10,
+            "design_preset":     "Strong (recommended)",
+            "app_title":         "TikTok Studio",
+            "app_tagline":       "Download · Remix · Localize · Design · Voice — your whole content pipeline in one place",
+        },
+        "tools": {k: True for k, _ in TOOL_REGISTRY},
+    }
+
+def load_config():
+    cfg = default_config()
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as fh:
+            saved = json.load(fh)
+        for section, values in saved.items():
+            if isinstance(values, dict) and isinstance(cfg.get(section), dict):
+                cfg[section].update(values)
+            else:
+                cfg[section] = values
+    except Exception:
+        pass                      # first run, or an unreadable file -> defaults
+    for k, _ in TOOL_REGISTRY:    # a tool added in a later version defaults to on
+        cfg["tools"].setdefault(k, True)
+    return cfg
+
+def save_config(cfg):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(CONFIG_FILE, 0o600)     # it holds API keys
+    except Exception:
+        pass
+
+CFG = load_config()
+PARAMS = CFG["params"]
+
+def cfg_api_key(name, *env_names):
+    """Admin dashboard value wins, then st.secrets, then the environment."""
+    v = CFG["api"].get(name, "")
+    if v:
+        return v, "admin dashboard"
+    for src in env_names:
+        try:
+            v = st.secrets.get(src, "")
+            if v:
+                return v, "secrets"
+        except Exception:
+            pass
+        v = os.environ.get(src, "")
+        if v:
+            return v, "environment"
+    return "", "none"
+
+render_hero(PARAMS.get("app_title", "TikTok Studio"),
+            PARAMS.get("app_tagline", ""),
+            sum(1 for k, _ in TOOL_REGISTRY if CFG["tools"].get(k, True)))
+
+# Tabs are built from the tools the admin left enabled. Anything disabled is
+# routed into a trailing sink tab whose button is hidden, so the existing
+# `with tabN:` blocks keep working untouched.
+_enabled  = [(k, lbl) for k, lbl in TOOL_REGISTRY if CFG["tools"].get(k, True)]
+_disabled = len(_enabled) < len(TOOL_REGISTRY)
+_labels   = [lbl for _, lbl in _enabled] + ["⚙️ Admin"] + (["·"] if _disabled else [])
+_tab_objs = st.tabs(_labels)
+
+_slot     = {k: _tab_objs[i] for i, (k, _) in enumerate(_enabled)}
+admin_tab = _tab_objs[len(_enabled)]
+_sink     = _tab_objs[-1] if _disabled else admin_tab
+
+if _disabled:
+    # the sink is the last tab; the highlight bar is a DIV, so :last-of-type
+    # among the buttons always lands on it
+    st.markdown(
+        '<style>.stTabs [data-baseweb="tab-list"] '
+        'button[data-baseweb="tab"]:last-of-type{display:none!important;}</style>',
+        unsafe_allow_html=True,
+    )
+
+def _T(key):
+    return _slot.get(key, _sink)
+
+tab1, tab2, tab3, tab4 = _T("downloader"), _T("variants"), _T("metadata"), _T("find_similar")
+tab5, tab6, tab7, tab8 = _T("audio"), _T("text"), _T("design"), _T("voice")
 
 
 # ============================================================
@@ -1349,18 +1590,23 @@ with tab4:
         "visual search. **Free tier = 100 searches/month** — no credit card needed."
     )
 
+    _fs_cfg_key, _fs_src = cfg_api_key("serpapi_key", "SERPAPI_KEY")
     if "serpapi_key" not in st.session_state:
         st.session_state.serpapi_key = ""
 
-    fs_key = st.text_input(
-        "SerpAPI Key",
-        value=st.session_state.serpapi_key,
-        type="password",
-        help="Get your free key at https://serpapi.com/manage-api-key",
-        key="fs_serpapi_input",
-    )
-    if fs_key:
-        st.session_state.serpapi_key = fs_key
+    if _fs_cfg_key:
+        st.session_state.serpapi_key = _fs_cfg_key
+        st.success(f"🔑 Key already configured (from the {_fs_src}) — nothing to do here.")
+    else:
+        fs_key = st.text_input(
+            "SerpAPI Key",
+            value=st.session_state.serpapi_key,
+            type="password",
+            help="Get your free key at https://serpapi.com/manage-api-key",
+            key="fs_serpapi_input",
+        )
+        if fs_key:
+            st.session_state.serpapi_key = fs_key
 
     # ---- Image upload ------------------------------------------------
     st.subheader("Step 2 — Upload Image")
@@ -2220,7 +2466,7 @@ with tab7:
                 ds_preset = st.select_slider(
                     "Cleanup strength",
                     options=list(DS_PRESETS.keys()) + ["Custom"],
-                    value="Strong (recommended)",
+                    value=PARAMS.get("design_preset", "Strong (recommended)"),
                     key="ds_preset",
                     help="Start at Strong. Go up to Maximum if any background survives; "
                          "drop to Balanced/Gentle if the design itself gets eaten.",
@@ -2404,3 +2650,450 @@ with tab7:
                 )
         elif not ds_files:
             st.info("Upload your designs above, choose what to do, then click **Process Designs**.")
+
+
+# ============================================================
+# TAB 8 — Saudi Voice (text → speech, Groq / Orpheus Arabic-Saudi)
+# ============================================================
+with tab8:
+    st.header("🗣️ Saudi Voice — Text to Speech")
+    st.markdown(
+        "Turn a script into natural **Saudi Arabic** narration for your videos. "
+        "Six native voices, powered by Orpheus on Groq."
+    )
+
+    TTS_MODEL = PARAMS.get("tts_model", "canopylabs/orpheus-arabic-saudi")
+    TTS_VOICES = {
+        "فهد — Fahad (male)":       "fahad",
+        "سلطان — Sultan (male)":    "sultan",
+        "عبدالله — Abdullah (male)": "abdullah",
+        "نورة — Noura (female)":    "noura",
+        "لولوة — Lulwa (female)":   "lulwa",
+        "عائشة — Aisha (female)":   "aisha",
+    }
+    TTS_CHUNK_CHARS = int(PARAMS.get("tts_chunk_chars", 550))   # keeps the request count low
+
+    try:
+        from groq import Groq
+        _tts_ok = True
+    except ImportError:
+        _tts_ok = False
+
+    # ── API key: secrets → env → manual entry. Never hard-coded. ──
+    def tts_get_key():
+        k, src = cfg_api_key("groq_api_key", "GROQ_API_KEY")
+        if k:
+            return k, src
+        return st.session_state.get("tts_manual_key", ""), "this session"
+
+    if not _tts_ok:
+        st.error("The Groq client isn't installed yet. Run this in Terminal, then restart the app:")
+        st.code("pip install groq", language="bash")
+    else:
+        tts_key, tts_key_src = tts_get_key()
+        if not tts_key:
+            st.warning(
+                "No Groq API key found. Add it to `.streamlit/secrets.toml` as "
+                "`GROQ_API_KEY = \"gsk_…\"` (recommended), or paste it below for this session."
+            )
+            st.text_input("Groq API key", type="password", key="tts_manual_key",
+                          placeholder="gsk_…")
+            tts_key, tts_key_src = tts_get_key()
+        else:
+            st.caption(f"🔑 Using the Groq key from **{tts_key_src}**.")
+
+        # ── helpers ─────────────────────────────────────────
+        def tts_wav_parts(data):
+            """(pcm, rate, channels, sampwidth) — tolerant of the placeholder
+            length Groq writes into its streamed WAV header."""
+            import struct
+            if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+                raise ValueError("the API did not return WAV audio")
+            pos, n = 12, len(data)
+            rate = ch = sw = None
+            pcm = b""
+            while pos + 8 <= n:
+                cid = data[pos:pos + 4]
+                (csz,) = struct.unpack("<I", data[pos + 4:pos + 8])
+                body = pos + 8
+                if cid == b"fmt ":
+                    _f, ch, rate, _br, _ba, bits = struct.unpack("<HHIIHH", data[body:body + 16])
+                    sw = bits // 8
+                elif cid == b"data":
+                    pcm = data[body:body + min(csz, n - body)]   # clamp the placeholder
+                    break
+                pos = body + csz + (csz & 1)
+            if rate is None or not pcm:
+                raise ValueError("no audio data in the response")
+            return pcm, rate, ch, sw
+
+        def tts_join_wavs(chunks, gap_ms=140):
+            """Concatenate WAV payloads into one valid WAV with a short pause between."""
+            import wave
+            pcms, rate, ch, sw = [], None, None, None
+            for c in chunks:
+                p, r, c2, s = tts_wav_parts(c)
+                if rate is None:
+                    rate, ch, sw = r, c2, s
+                pcms.append(p)
+            silence = b"\x00" * (int(rate * gap_ms / 1000) * ch * sw)
+            body = silence.join(pcms)
+            out = BytesIO()
+            with wave.open(out, "wb") as w:
+                w.setnchannels(ch); w.setsampwidth(sw); w.setframerate(rate)
+                w.writeframes(body)
+            return out.getvalue(), len(body) / float(rate * ch * sw)
+
+        _TTS_SPLIT = re.compile(r"(?<=[\.\!\?؟۔،\:\;])\s+|\n+")
+
+        def tts_chunk_text(text, limit=TTS_CHUNK_CHARS):
+            """Split on Arabic + Latin sentence boundaries into <=limit-char pieces."""
+            text = (text or "").strip()
+            if not text:
+                return []
+            pieces, buf = [], ""
+            for part in [p for p in _TTS_SPLIT.split(text) if p and p.strip()]:
+                part = part.strip()
+                while len(part) > limit:                      # one very long sentence
+                    cut = part.rfind(" ", 0, limit)
+                    cut = cut if cut > limit * 0.5 else limit
+                    if buf:
+                        pieces.append(buf); buf = ""
+                    pieces.append(part[:cut].strip()); part = part[cut:].strip()
+                if not buf:
+                    buf = part
+                elif len(buf) + 1 + len(part) <= limit:
+                    buf += " " + part
+                else:
+                    pieces.append(buf); buf = part
+            if buf:
+                pieces.append(buf)
+            return pieces
+
+        def tts_speak(client, text, voice, tries=4):
+            """One chunk → WAV bytes, backing off through Groq's 1200 TPM limit."""
+            last = None
+            for attempt in range(tries):
+                try:
+                    r = client.audio.speech.create(
+                        model=TTS_MODEL, voice=voice, input=text, response_format="wav",
+                    )
+                    return r.read()
+                except Exception as e:
+                    last = e
+                    msg = str(e)
+                    if "rate limit" in msg.lower() or "429" in msg:
+                        m = re.search(r"try again in ([\d\.]+)s", msg)
+                        time.sleep(min(60.0, float(m.group(1)) + 1.0 if m else 10.0 * (attempt + 1)))
+                    elif attempt < tries - 1:
+                        time.sleep(3.0 * (attempt + 1))
+                    else:
+                        break
+            raise last
+
+        def tts_postprocess(wav_bytes, speed, fmt):
+            """Speed change + format conversion via ffmpeg (the API ignores `speed`)."""
+            if abs(speed - 1.0) < 0.01 and fmt == "WAV":
+                return wav_bytes, "wav", "audio/wav"
+            ext = "mp3" if fmt == "MP3" else "wav"
+            with tempfile.TemporaryDirectory() as td:
+                src = os.path.join(td, "in.wav")
+                dst = os.path.join(td, f"out.{ext}")
+                with open(src, "wb") as fh:
+                    fh.write(wav_bytes)
+                cmd = [FFMPEG, "-y", "-i", src]
+                if abs(speed - 1.0) >= 0.01:
+                    cmd += ["-filter:a", f"atempo={speed:.2f}"]
+                if ext == "mp3":
+                    cmd += ["-codec:a", "libmp3lame", "-b:a", "192k"]
+                cmd += [dst]
+                p = subprocess.run(cmd, capture_output=True)
+                if p.returncode != 0 or not os.path.exists(dst):
+                    # ffmpeg unavailable or unhappy — hand back the untouched WAV
+                    return wav_bytes, "wav", "audio/wav"
+                with open(dst, "rb") as fh:
+                    return fh.read(), ext, ("audio/mpeg" if ext == "mp3" else "audio/wav")
+
+        # ── Step 1 — script ─────────────────────────────────
+        st.subheader("Step 1 — Your Script")
+
+        # convenience: reuse whatever the Extract Text tab produced
+        _et = [r for r in st.session_state.get("et_results", []) if not r.get("error")]
+        if _et:
+            _pick = st.selectbox(
+                "Reuse a transcription from the Extract Text tab (optional)",
+                ["— none —"] + [r["name"] for r in _et], key="tts_reuse",
+            )
+            if _pick != "— none —" and st.button("⬅️ Load that text", key="tts_load_et"):
+                st.session_state.tts_text = next(r["text"] for r in _et if r["name"] == _pick)
+                st.rerun()
+
+        tts_text = st.text_area(
+            "Text to speak (Arabic or English)",
+            height=180, key="tts_text",
+            placeholder="اكتب النص هنا… مثال: أهلاً وسهلاً بكم في قناتنا، اليوم عندنا موضوع مهم جداً.",
+        )
+
+        _chunks = tts_chunk_text(tts_text)
+        if tts_text:
+            _mins = len(tts_text) / 900.0
+            st.caption(
+                f"📝 {len(tts_text)} characters · {len(_chunks)} request(s) · roughly "
+                f"{_mins:.1f} min of audio"
+            )
+
+        # ── Step 2 — voice ──────────────────────────────────
+        st.subheader("Step 2 — Voice & Delivery")
+        tv1, tv2, tv3 = st.columns([2, 1, 1])
+        with tv1:
+            _vnames = list(TTS_VOICES.keys())
+            _vdef = PARAMS.get("tts_default_voice", "fahad")
+            _vidx = next((i for i, n in enumerate(_vnames) if TTS_VOICES[n] == _vdef), 0)
+            tts_voice_label = st.selectbox("Voice", _vnames, index=_vidx, key="tts_voice")
+        with tv2:
+            tts_speed = st.slider("Speed", 0.5, 2.0, 1.0, 0.05, key="tts_speed",
+                                  help="Applied locally with ffmpeg — the model itself always "
+                                       "speaks at its natural pace.")
+        with tv3:
+            tts_fmt = st.selectbox("Format", ["MP3", "WAV"], key="tts_fmt",
+                                   help="MP3 needs ffmpeg. WAV is always available.")
+        tts_gap = st.slider("Pause between sentences (ms)", 0, 600,
+                            int(PARAMS.get("tts_gap_ms", 140)), 20, key="tts_gap",
+                            help="Only matters when the script is long enough to be split.")
+
+        # ── Generate ────────────────────────────────────────
+        if st.button("🎙️ Generate Voice", type="primary", use_container_width=True,
+                     disabled=not (tts_text and tts_text.strip() and tts_key), key="tts_run"):
+            try:
+                client = Groq(api_key=tts_key)
+                prog, status = st.progress(0.0), st.empty()
+                parts, failed = [], None
+                for i, piece in enumerate(_chunks):
+                    status.info(f"Speaking part {i + 1} of {len(_chunks)}…")
+                    try:
+                        parts.append(tts_speak(client, piece, TTS_VOICES[tts_voice_label]))
+                    except Exception as e:
+                        failed = f"Part {i + 1} failed: {e}"
+                        break
+                    prog.progress((i + 1) / len(_chunks))
+                status.empty(); prog.empty()
+
+                if failed and not parts:
+                    st.error(f"❌ {failed}")
+                    st.session_state.tts_audio = None
+                else:
+                    if failed:
+                        st.warning(f"⚠️ {failed} — keeping the {len(parts)} part(s) that worked.")
+                    joined, dur = tts_join_wavs(parts, tts_gap)
+                    data, ext, mime = tts_postprocess(joined, tts_speed, tts_fmt)
+                    st.session_state.tts_audio = {
+                        "data": data, "ext": ext, "mime": mime,
+                        "dur": dur / max(tts_speed, 0.01),
+                        "voice": tts_voice_label, "parts": len(parts),
+                    }
+            except Exception as e:
+                st.error(f"❌ {e}")
+                st.session_state.tts_audio = None
+
+        # ── Result ──────────────────────────────────────────
+        _a = st.session_state.get("tts_audio")
+        if _a:
+            st.success(
+                f"✅ Done — {_a['dur']:.1f}s of audio in **{_a['voice']}** "
+                f"({_a['parts']} part(s), {len(_a['data']) / 1024:.0f} KB)."
+            )
+            st.audio(_a["data"], format=_a["mime"])
+            st.download_button(
+                "⬇️ Download audio",
+                data=_a["data"],
+                file_name=f"saudi_voice_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.{_a['ext']}",
+                mime=_a["mime"],
+                use_container_width=True,
+                key="tts_dl",
+            )
+        elif not tts_text:
+            st.info("Write or paste your script above, pick a voice, then hit **Generate Voice**.")
+
+
+# ============================================================
+# ADMIN — login-gated settings dashboard
+# ============================================================
+with admin_tab:
+    if not st.session_state.get("is_admin"):
+        st.header("⚙️ Admin")
+        st.markdown("Sign in to manage API keys, tool visibility and defaults.")
+        _l1, _l2 = st.columns([1, 1])
+        with _l1:
+            _u = st.text_input("Username", key="adm_user")
+            _p = st.text_input("Password", type="password", key="adm_pass")
+            if st.button("🔓 Sign in", type="primary", key="adm_login"):
+                if _u.strip() == CFG["admin"]["username"] and _sha(_p) == CFG["admin"]["password_hash"]:
+                    st.session_state.is_admin = True
+                    st.rerun()
+                else:
+                    st.error("Wrong username or password.")
+        with _l2:
+            st.info(
+                "This gate only hides the settings panel — it is not real "
+                "security. Anyone who can open the app can still use the tools, "
+                "and anyone with access to the server can read the key file. "
+                "Don't treat it as protection for a public deployment."
+            )
+    else:
+        _h1, _h2 = st.columns([4, 1])
+        with _h1:
+            st.header("⚙️ Admin Dashboard")
+            st.caption(f"Signed in as **{CFG['admin']['username']}**")
+        with _h2:
+            if st.button("Sign out", key="adm_logout", use_container_width=True):
+                st.session_state.is_admin = False
+                st.rerun()
+
+        # ── API keys ────────────────────────────────────────
+        st.subheader("🔑 API Keys")
+        st.caption(
+            f"Saved to `{CONFIG_FILE}` on this machine. That file is gitignored — "
+            "it is never committed. On Streamlit Cloud the filesystem resets on "
+            "redeploy, so there use **Settings → Secrets** instead."
+        )
+        _k1, _k2 = st.columns(2)
+        with _k1:
+            _groq = st.text_input(
+                "Groq API key — powers 🗣️ Saudi Voice", type="password",
+                value=CFG["api"].get("groq_api_key", ""),
+                placeholder="gsk_…", key="adm_groq",
+            )
+        with _k2:
+            _serp = st.text_input(
+                "SerpAPI key — powers 🔍 Find Similar", type="password",
+                value=CFG["api"].get("serpapi_key", ""),
+                placeholder="Your SerpAPI key", key="adm_serp",
+            )
+        _live_groq, _src_groq = cfg_api_key("groq_api_key", "GROQ_API_KEY")
+        _live_serp, _src_serp = cfg_api_key("serpapi_key", "SERPAPI_KEY")
+        st.caption(
+            f"Groq: {'✅ active via ' + _src_groq if _live_groq else '❌ not set'} · "
+            f"SerpAPI: {'✅ active via ' + _src_serp if _live_serp else '❌ not set'}"
+        )
+        if st.button("💾 Save API keys", type="primary", key="adm_save_keys"):
+            CFG["api"]["groq_api_key"] = _groq.strip()
+            CFG["api"]["serpapi_key"] = _serp.strip()
+            save_config(CFG)
+            st.success("Saved.")
+            st.rerun()
+
+        # ── Visible tools ───────────────────────────────────
+        st.subheader("🧩 Tools Shown in the App")
+        st.caption("Untick a tool to hide its tab from everyone.")
+        _tcols = st.columns(4)
+        _new_tools = {}
+        for _i, (_key, _label) in enumerate(TOOL_REGISTRY):
+            with _tcols[_i % 4]:
+                _new_tools[_key] = st.checkbox(
+                    _label, value=CFG["tools"].get(_key, True), key=f"adm_tool_{_key}"
+                )
+        if not any(_new_tools.values()):
+            st.warning("At least one tool has to stay visible.")
+        if st.button("💾 Save visible tools", type="primary", key="adm_save_tools",
+                     disabled=not any(_new_tools.values())):
+            CFG["tools"] = _new_tools
+            save_config(CFG)
+            st.success("Saved.")
+            st.rerun()
+
+        # ── Defaults ────────────────────────────────────────
+        st.subheader("🎚️ Default Parameters")
+        _p1, _p2 = st.columns(2)
+        with _p1:
+            st.markdown("**🗣️ Saudi Voice**")
+            _m_model = st.text_input("Groq TTS model", value=PARAMS.get("tts_model", ""),
+                                     key="adm_model")
+            _m_voice = st.selectbox(
+                "Default voice",
+                ["fahad", "sultan", "abdullah", "noura", "lulwa", "aisha"],
+                index=["fahad", "sultan", "abdullah", "noura", "lulwa", "aisha"].index(
+                    PARAMS.get("tts_default_voice", "fahad")
+                ) if PARAMS.get("tts_default_voice", "fahad") in
+                     ["fahad", "sultan", "abdullah", "noura", "lulwa", "aisha"] else 0,
+                key="adm_voice",
+            )
+            _m_chunk = st.slider("Characters per request", 200, 900,
+                                 int(PARAMS.get("tts_chunk_chars", 550)), 50, key="adm_chunk",
+                                 help="Bigger chunks = fewer requests against Groq's quota, "
+                                      "but a higher chance of hitting the per-minute token limit.")
+            _m_gap = st.slider("Default pause between sentences (ms)", 0, 600,
+                               int(PARAMS.get("tts_gap_ms", 140)), 20, key="adm_gap")
+        with _p2:
+            st.markdown("**🔄 Refresh Metadata**")
+            _m_days = st.slider("Back-date timestamps up to (days)", 1, 60,
+                                int(PARAMS.get("meta_days_back", 10)), 1, key="adm_days")
+            st.markdown("**🎨 Design Studio**")
+            _m_preset = st.select_slider(
+                "Default cleanup strength",
+                options=["Gentle", "Balanced", "Strong (recommended)", "Maximum"],
+                value=PARAMS.get("design_preset", "Strong (recommended)"), key="adm_preset",
+            )
+            st.markdown("**🏷️ Branding**")
+            _m_title = st.text_input("App title", value=PARAMS.get("app_title", "TikTok Studio"),
+                                     key="adm_title")
+            _m_tag = st.text_area("Tagline", value=PARAMS.get("app_tagline", ""), height=80,
+                                  key="adm_tagline")
+
+        if st.button("💾 Save parameters", type="primary", key="adm_save_params"):
+            CFG["params"].update({
+                "tts_model": _m_model.strip() or "canopylabs/orpheus-arabic-saudi",
+                "tts_default_voice": _m_voice,
+                "tts_chunk_chars": int(_m_chunk),
+                "tts_gap_ms": int(_m_gap),
+                "meta_days_back": int(_m_days),
+                "design_preset": _m_preset,
+                "app_title": _m_title.strip() or "TikTok Studio",
+                "app_tagline": _m_tag.strip(),
+            })
+            save_config(CFG)
+            st.success("Saved.")
+            st.rerun()
+
+        # ── Account ─────────────────────────────────────────
+        st.subheader("👤 Admin Account")
+        _a1, _a2, _a3 = st.columns(3)
+        with _a1:
+            _n_user = st.text_input("Username", value=CFG["admin"]["username"], key="adm_newuser")
+        with _a2:
+            _n_pw = st.text_input("New password", type="password", key="adm_newpw")
+        with _a3:
+            _n_pw2 = st.text_input("Confirm password", type="password", key="adm_newpw2")
+        if st.button("💾 Update credentials", key="adm_save_cred"):
+            if not _n_user.strip():
+                st.error("The username can't be empty.")
+            elif _n_pw and _n_pw != _n_pw2:
+                st.error("The two passwords don't match.")
+            else:
+                CFG["admin"]["username"] = _n_user.strip()
+                if _n_pw:
+                    CFG["admin"]["password_hash"] = _sha(_n_pw)
+                save_config(CFG)
+                st.success("Updated." + ("" if _n_pw else " (password unchanged)"))
+                st.rerun()
+
+        # ── Config file ─────────────────────────────────────
+        st.subheader("💾 Configuration File")
+        _safe = json.loads(json.dumps(CFG))
+        _safe["api"] = {k: ("•" * 8 + v[-4:] if v else "") for k, v in _safe["api"].items()}
+        _safe["admin"]["password_hash"] = "•" * 16
+        with st.expander("Show current configuration (keys masked)"):
+            st.json(_safe)
+        st.download_button(
+            "⬇️ Download backup (includes real keys — keep it private)",
+            data=json.dumps(CFG, indent=2, ensure_ascii=False).encode("utf-8"),
+            file_name="studio_config_backup.json", mime="application/json",
+            key="adm_backup", use_container_width=True,
+        )
+        _restore = st.file_uploader("Restore from a backup", type=["json"], key="adm_restore")
+        if _restore and st.button("♻️ Restore this file", key="adm_do_restore"):
+            try:
+                save_config(json.loads(_restore.getvalue().decode("utf-8")))
+                st.success("Restored.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Couldn't read that file: {e}")

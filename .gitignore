@@ -1,0 +1,10 @@
+users_db.json
+
+# secrets — never commit these
+.streamlit/secrets.toml
+studio_config.json
+*.env
+
+__pycache__/
+*.pyc
+.DS_Store
