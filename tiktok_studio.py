@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
+import streamlit.components.v1 as components
 import subprocess, os, datetime, tempfile, json, re, time, random, uuid
 import zipfile, io, traceback, requests, threading, shutil, hashlib
 from io import BytesIO
@@ -674,6 +675,8 @@ with tab1:
                 try:
                     videos = extract_with_ytdlp(tiktok_url)
                     if videos:
+                        for _k in [k for k in st.session_state if k.startswith("dlpick_")]:
+                            del st.session_state[_k]
                         st.session_state.dl_videos = videos
                         st.session_state.dl_selected = set()
                         st.success(f"✅ Found **{len(videos)}** videos!")
@@ -686,75 +689,227 @@ with tab1:
     if st.session_state.dl_videos:
         st.markdown("---")
         st.subheader("Step 2 — Select Videos")
+        st.caption(
+            "Click a card to toggle it · **drag a box** across the grid to grab many at once · "
+            "**Shift-click** for a range · hold **Alt** while dragging to deselect. "
+            "Nothing reloads until you hit Download."
+        )
 
-        col_sel, col_desel = st.columns(2)
-        with col_sel:
-            if st.button("✅ Select All", use_container_width=True):
-                st.session_state.dl_selected = {v["id"] for v in st.session_state.dl_videos}
-        with col_desel:
-            if st.button("❌ Deselect All", use_container_width=True):
-                st.session_state.dl_selected = set()
-
-        # Grid of video cards
-        cols_per_row = 4
         videos = st.session_state.dl_videos
-        for row_start in range(0, len(videos), cols_per_row):
-            row_videos = videos[row_start: row_start + cols_per_row]
-            cols = st.columns(cols_per_row)
-            for col, video in zip(cols, row_videos):
-                with col:
-                    is_selected = video["id"] in st.session_state.dl_selected
-                    border_color = "#ee0a78" if is_selected else "#ddd"
-                    check_icon = "✅" if is_selected else "⬜"
 
-                    st.markdown(
-                        f"""<div style="border:3px solid {border_color};border-radius:12px;
-                        padding:10px;margin-bottom:8px;text-align:center;">
-                        <div style="font-size:22px;">{check_icon}</div>
-                        <div style="font-size:12px;font-weight:600;margin:6px 0;
-                        overflow:hidden;max-height:2.8em;">{video['title'][:60]}</div>
-                        <div style="font-size:11px;color:#666;">
-                        👁️ {video['views']} &nbsp; ❤️ {video['likes']}</div></div>""",
-                        unsafe_allow_html=True,
-                    )
-                    if st.button(
-                        "Select" if not is_selected else "Deselect",
-                        key=f"sel_{video['id']}",
-                        use_container_width=True,
-                    ):
-                        if is_selected:
-                            st.session_state.dl_selected.discard(video["id"])
-                        else:
-                            st.session_state.dl_selected.add(video["id"])
-                        st.rerun()
+        # Selection state lives in the checkbox widgets themselves. Seed them
+        # once per extraction so a fresh URL doesn't inherit stale ticks.
+        for _v in videos:
+            st.session_state.setdefault(f"dlpick_{_v['id']}", _v["id"] in st.session_state.dl_selected)
 
-        # ---- Step 3: Download ----
-        st.markdown("---")
-        st.subheader("Step 3 — Download")
-        selected_count = len(st.session_state.dl_selected)
-        st.info(f"**{selected_count}** video(s) selected")
+        st.markdown("""
+<style>
+/* the card lights up straight from the checkbox state — no round trip */
+[data-testid="stColumn"]:has(.dl-card),[data-testid="column"]:has(.dl-card){position:relative;}
+.dl-card{border:2px solid var(--ts-border);border-radius:12px;padding:10px;
+  margin-bottom:6px;text-align:center;background:var(--ts-surface);
+  transition:border-color .12s ease, background .12s ease;cursor:pointer;
+  user-select:none;-webkit-user-select:none;}
+.dl-card:hover{border-color:var(--ts-border-lit);}
+[data-testid="stColumn"]:has(input:checked) .dl-card,
+[data-testid="column"]:has(input:checked) .dl-card{
+  border-color:var(--ts-cyan);background:rgba(37,244,238,.07);
+  box-shadow:0 0 0 1px rgba(37,244,238,.35);}
+[data-testid="stColumn"]:has(input:checked) .dl-card .dl-tick,
+[data-testid="column"]:has(input:checked) .dl-card .dl-tick{opacity:1;}
+.dl-tick{position:absolute;top:8px;right:8px;width:20px;height:20px;border-radius:50%;
+  background:var(--ts-grad);color:#06080C;font-size:13px;font-weight:800;line-height:20px;
+  opacity:0;transition:opacity .12s ease;}
+.dl-thumb{width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:8px;
+  background:var(--ts-surface2);margin-bottom:6px;pointer-events:none;}
+.dl-title{font-size:11.5px;font-weight:600;line-height:1.35;max-height:2.7em;
+  overflow:hidden;margin-bottom:4px;}
+.dl-meta{font-size:10.5px;color:var(--ts-muted);}
+/* the per-card checkbox is driven by the card; keep it out of the way */
+.dl-grid-scope [data-testid="stCheckbox"]{height:0;overflow:hidden;margin:0;padding:0;}
+#dl-marquee{position:fixed;border:1.5px solid #25F4EE;background:rgba(37,244,238,.14);
+  border-radius:4px;pointer-events:none;z-index:99999;display:none;}
+.dl-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 14px;
+  padding:10px 14px;border:1px solid var(--ts-border);border-radius:12px;
+  background:var(--ts-surface);}
+.dl-bar button{background:var(--ts-surface2);color:var(--ts-text);border:1px solid var(--ts-border-lit);
+  border-radius:9px;padding:5px 12px;font-size:.82rem;font-weight:600;cursor:pointer;
+  font-family:inherit;transition:all .14s ease;}
+.dl-bar button:hover{border-color:var(--ts-cyan);color:var(--ts-cyan);}
+#dl-count{margin-left:auto;font-weight:700;font-size:.86rem;color:var(--ts-cyan);}
+</style>
+""", unsafe_allow_html=True)
 
-        dl_col1, dl_col2 = st.columns([3, 1])
-        with dl_col2:
-            max_workers = st.slider(
-                "⚡ Parallel downloads",
-                min_value=1, max_value=10, value=5,
-                help="How many videos to download at the same time. 5 is a safe default — go higher only if your connection is very fast and TikTok isn't rate-limiting you."
+        with st.form("dl_pick_form", border=False):
+            st.markdown(
+                '<div class="dl-grid-scope">'
+                '<div class="dl-bar">'
+                '  <button type="button" id="dl-all">Select all</button>'
+                '  <button type="button" id="dl-none">Clear</button>'
+                '  <button type="button" id="dl-invert">Invert</button>'
+                '  <span id="dl-count">0 selected</span>'
+                '</div></div>',
+                unsafe_allow_html=True,
             )
 
-        with dl_col1:
-            dl_btn = st.button(
-                f"📥 Download {selected_count} Video(s) as ZIP",
-                disabled=selected_count == 0,
-                use_container_width=True,
-            )
+            cols_per_row = 4
+            for row_start in range(0, len(videos), cols_per_row):
+                cols = st.columns(cols_per_row)
+                for col, video in zip(cols, videos[row_start:row_start + cols_per_row]):
+                    with col:
+                        _thumb = (f'<img class="dl-thumb" src="{video["thumbnail"]}" loading="lazy">'
+                                  if video.get("thumbnail") else '<div class="dl-thumb"></div>')
+                        st.markdown(
+                            f'<div class="dl-card">{_thumb}'
+                            f'<div class="dl-tick">✓</div>'
+                            f'<div class="dl-title">{video["title"][:70]}</div>'
+                            f'<div class="dl-meta">👁️ {video["views"]} &nbsp; ❤️ {video["likes"]}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.checkbox("Select", key=f"dlpick_{video['id']}",
+                                    label_visibility="collapsed")
+
+            st.markdown("---")
+            _f1, _f2 = st.columns([3, 1])
+            with _f2:
+                max_workers = st.slider(
+                    "⚡ Parallel downloads", 1, 10, 5,
+                    help="How many videos to download at the same time. 5 is a safe default — go "
+                         "higher only if your connection is very fast and TikTok isn't rate-limiting you.",
+                )
+            with _f1:
+                st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+                dl_btn = st.form_submit_button(
+                    "📥 Download selected as ZIP", type="primary", use_container_width=True,
+                )
+
+        # Client-side selection: card clicks, shift-ranges and marquee drag.
+        # Everything here only toggles checkboxes that already exist, so if the
+        # script fails the checkboxes still work on their own.
+        components.html("""
+<script>
+(function(){
+  const D = window.parent.document;
+  if(!D) return;
+  let anchor = null;
+
+  const cells = () => {
+    const scope = D.querySelector('[data-testid="stForm"]');
+    if(!scope) return [];
+    return [...scope.querySelectorAll('[data-testid="stCheckbox"] input[type=checkbox]')]
+      .map(inp => ({inp, cell: inp.closest('[data-testid="stColumn"],[data-testid="column"]')}))
+      .filter(x => x.cell && x.cell.querySelector('.dl-card'));
+  };
+  const setChecked = (inp, want) => { if(inp.checked !== want) inp.click(); };
+  // React commits checkbox state on its own tick, so reading synchronously
+  // right after a .click() returns the pre-click value. Always defer.
+  const paint = () => {
+    const c = cells(), n = c.filter(x => x.inp.checked).length;
+    const el = D.getElementById('dl-count');
+    if(el) el.textContent = n + ' / ' + c.length + ' selected';
+  };
+  const refresh = () => { setTimeout(paint, 0); setTimeout(paint, 120); };
+
+  function wire(){
+    const scope = D.querySelector('[data-testid="stForm"]');
+    if(!scope || !D.querySelector('.dl-card')) return false;
+    if(scope.dataset.dlWired === '1'){ refresh(); return true; }
+    scope.dataset.dlWired = '1';
+
+    const all = D.getElementById('dl-all'),
+          none = D.getElementById('dl-none'),
+          inv = D.getElementById('dl-invert');
+    if(all)  all.onclick  = e => {e.preventDefault(); cells().forEach(x=>setChecked(x.inp,true));  refresh();};
+    if(none) none.onclick = e => {e.preventDefault(); cells().forEach(x=>setChecked(x.inp,false)); refresh();};
+    if(inv)  inv.onclick  = e => {e.preventDefault(); cells().forEach(x=>x.inp.click());           refresh();};
+
+    let band = D.getElementById('dl-marquee');
+    if(!band){ band = D.createElement('div'); band.id = 'dl-marquee'; D.body.appendChild(band); }
+
+    let sx=0, sy=0, dragging=false, moved=false, additive=true;
+
+    scope.addEventListener('mousedown', ev => {
+      if(ev.button !== 0) return;
+      if(ev.target.closest('button, input, .dl-bar, [data-testid="stSlider"]')) return;
+      const c = cells(); if(!c.length) return;
+      sx = ev.clientX; sy = ev.clientY;
+      dragging = true; moved = false; additive = !ev.altKey;
+      ev.preventDefault();
+    });
+
+    D.addEventListener('mousemove', ev => {
+      if(!dragging) return;
+      if(!moved && Math.hypot(ev.clientX-sx, ev.clientY-sy) < 5) return;
+      moved = true;
+      const x = Math.min(sx, ev.clientX), y = Math.min(sy, ev.clientY);
+      const w = Math.abs(ev.clientX-sx), h = Math.abs(ev.clientY-sy);
+      Object.assign(band.style, {display:'block', left:x+'px', top:y+'px',
+                                 width:w+'px', height:h+'px'});
+      cells().forEach(({cell}) => {
+        const r = cell.getBoundingClientRect();
+        const hit = !(r.right < x || r.left > x+w || r.bottom < y || r.top > y+h);
+        const card = cell.querySelector('.dl-card');
+        if(card) card.style.outline = hit ? '2px solid #FE2C55' : '';
+      });
+    });
+
+    D.addEventListener('mouseup', ev => {
+      if(!dragging) return;
+      dragging = false;
+      band.style.display = 'none';
+      const c = cells();
+      c.forEach(({cell}) => { const k = cell.querySelector('.dl-card'); if(k) k.style.outline=''; });
+
+      if(moved){
+        const x = Math.min(sx, ev.clientX), y = Math.min(sy, ev.clientY);
+        const w = Math.abs(ev.clientX-sx), h = Math.abs(ev.clientY-sy);
+        c.forEach(({inp, cell}) => {
+          const r = cell.getBoundingClientRect();
+          if(!(r.right < x || r.left > x+w || r.bottom < y || r.top > y+h)) setChecked(inp, additive);
+        });
+      } else {
+        const cell = ev.target.closest('[data-testid="stColumn"],[data-testid="column"]');
+        if(cell && cell.querySelector('.dl-card')){
+          const idx = c.findIndex(z => z.cell === cell);
+          if(idx >= 0){
+            if(ev.shiftKey && anchor !== null){
+              const [a,b] = [Math.min(anchor,idx), Math.max(anchor,idx)];
+              for(let i=a;i<=b;i++) setChecked(c[i].inp, true);
+            } else {
+              c[idx].inp.click();
+              anchor = idx;
+            }
+          }
+        }
+      }
+      refresh();
+    });
+
+    scope.addEventListener('change', refresh, true);
+    refresh();
+    return true;
+  }
+
+  let tries = 0;
+  const t = setInterval(() => { if(wire() || ++tries > 60) clearInterval(t); }, 150);
+})();
+</script>
+""", height=0)
 
         if dl_btn:
             # Pass full video objects so downloader has the real URL
+            st.session_state.dl_selected = {
+                v["id"] for v in st.session_state.dl_videos
+                if st.session_state.get(f"dlpick_{v['id']}")
+            }
             selected_videos = [
                 v for v in st.session_state.dl_videos
                 if v["id"] in st.session_state.dl_selected
             ]
+            if not selected_videos:
+                st.warning("Nothing selected — tick at least one video first.")
+                st.stop()
             # Create a persistent batch on disk — survives sleep / lost connection
             batch_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             batch_dir = os.path.join(DL_ROOT, batch_id)
