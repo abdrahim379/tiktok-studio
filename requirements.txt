@@ -1,7 +1,9 @@
 streamlit
 yt-dlp
 requests
-faster-whisper
 pillow
 numpy
 groq
+piexif
+faster-whisper
+rembg[cpu]

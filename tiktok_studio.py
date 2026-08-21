@@ -931,6 +931,19 @@ with tab2:
     st.markdown("Generate up to **5 variants** of your videos (120fps • 4000kbps • 1080×1920)")
 
     # ---- Constants ----
+    VG_ROOT = os.path.expanduser("~/.tiktok_studio_variants")
+    VG_BORDER_COLORS = {
+        "Yellow":  "#FFDD57",
+        "Orange":  "#FF8A3D",
+        "Green":   "#3DDC84",
+        "Blue":    "#2F80FF",
+        "Cyan":    "#25F4EE",
+        "Pink":    "#FE2C55",
+        "Red":     "#FF3B30",
+        "Purple":  "#A55EEA",
+        "White":   "#FFFFFF",
+        "Black":   "#000000",
+    }
     TARGET_W, TARGET_H = 1080, 1920
     MAX_FPS = 120
     SAFE_THREADS = ["-threads", "2"]
@@ -1049,6 +1062,7 @@ with tab2:
         variant_name, use_hw_decode, use_ultra_stable,
         hook_type, hook_dur, hook_img_path, hook_vid_path, hook_keep_audio,
         zoom_mode, audio_mode, add_blank_intro, blank_intro_sec, overlay_img_path=None,
+        border_hex=None, border_thick=28, border_margin=18,
     ):
         try:
             fps = 120
@@ -1070,6 +1084,15 @@ with tab2:
                     f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p,fps={out_fps}"
                 )
             base_vf = ",".join([*base_zoom, target_norm]) if base_zoom else target_norm
+
+            # Variant 5 colour border — folded into the base chain so it
+            # survives whichever hook/intro path runs below
+            if variant_name == "5" and border_hex:
+                _m = max(0, int(border_margin))
+                _t = max(1, int(border_thick))
+                _c = "0x" + str(border_hex).lstrip("#")
+                base_vf += (f",drawbox=x={_m}:y={_m}:w=iw-{2*_m}:h=ih-{2*_m}"
+                            f":color={_c}@1.0:t={_t}")
 
             metadata_clear = [
                 "-map_metadata", "-1",
@@ -1191,7 +1214,7 @@ with tab2:
                 "Variants to generate",
                 options=["1", "2", "3", "4", "5"],
                 default=["1", "2", "3", "4"],
-                help="1=Base | 2=+Intro+Hook | 3=+Pitch+1% | 4=+Pitch-1% | 5=Overlay",
+                help="1=Base | 2=+Intro+Hook | 3=+Pitch+1% | 4=+Pitch-1% | 5=Border/Overlay",
             )
             hook_type = st.selectbox("Hook type (V2/V3/V4)", ["None", "Image overlay", "Video prepend", "Video overlay"])
 
@@ -1199,7 +1222,6 @@ with tab2:
         hook_img = None
         hook_vid = None
         hook_keep_audio = False
-        overlay_img = None
 
         if hook_type == "Image overlay":
             hook_img = st.file_uploader("Hook image (PNG/JPG)", type=["png", "jpg", "jpeg"], key="vg_hook_img")
@@ -1208,7 +1230,50 @@ with tab2:
             if hook_type == "Video prepend":
                 hook_keep_audio = st.checkbox("Keep hook audio (prepend)", value=True)
 
-        overlay_img = st.file_uploader("Variant 5 — Overlay/Border PNG (transparent)", type=["png"], key="vg_overlay")
+    st.markdown("### 🖼️ Variant 5 — Border")
+    v5_mode = st.radio(
+        "Style", ["Colour border", "Overlay PNG"], horizontal=True, key="vg_v5_mode",
+        help="A colour border is drawn straight onto the video — no file needed.",
+    )
+
+    overlay_img = None
+    border_hex = None
+    border_thick = 28
+    border_margin = 18
+
+    if v5_mode == "Colour border":
+        _b1, _b2, _b3 = st.columns([2, 1, 1])
+        with _b1:
+            _names = list(VG_BORDER_COLORS.keys()) + ["Custom…"]
+            _pick = st.selectbox("Colour", _names, index=0, key="vg_bcolor")
+            border_hex = (st.color_picker("Pick a colour", "#FFDD57", key="vg_bcustom")
+                          if _pick == "Custom…" else VG_BORDER_COLORS[_pick])
+        with _b2:
+            border_thick = st.slider("Thickness (px)", 4, 140, 28, 2, key="vg_bthick")
+        with _b3:
+            border_margin = st.slider("Margin from edge (px)", 0, 140, 18, 2, key="vg_bmargin")
+
+        # live preview at 1080×1920 scaled down
+        _pw, _ph = 108, 192
+        _sm = border_margin * _pw / TARGET_W
+        _st_ = max(1.0, border_thick * _pw / TARGET_W)
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:14px;margin-top:6px;">'
+            f'  <div style="width:{_pw}px;height:{_ph}px;background:#2A2E3A;border-radius:6px;'
+            f'       position:relative;flex:0 0 auto;">'
+            f'    <div style="position:absolute;left:{_sm}px;top:{_sm}px;'
+            f'         right:{_sm}px;bottom:{_sm}px;'
+            f'         border:{_st_}px solid {border_hex};"></div>'
+            f'  </div>'
+            f'  <div style="font-size:.85rem;color:var(--ts-muted);">Preview of variant 5<br>'
+            f'    <code>{border_hex}</code> · {border_thick}px thick · {border_margin}px inset</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        overlay_img = st.file_uploader(
+            "Overlay/Border PNG (transparent)", type=["png"], key="vg_overlay"
+        )
 
     st.markdown("### 📥 Videos to process")
     videos = st.file_uploader(
@@ -1257,6 +1322,10 @@ with tab2:
                         f.write(overlay_img.read())
                         overlay_img_path = f.name
 
+                vg_batch = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                vg_dir = os.path.join(VG_ROOT, vg_batch)
+                os.makedirs(vg_dir, exist_ok=True)
+
                 for video_idx, file in enumerate(videos):
                     st.markdown(f"---\n## 🎬 Video {video_idx+1}/{len(videos)}: **{file.name}**")
                     input_path = None
@@ -1273,7 +1342,7 @@ with tab2:
                     for variant_idx, variant in enumerate(variants):
                         try:
                             out_name = f"{base_name}_{variant['name']}.mp4"
-                            out_tmp = os.path.join(tempfile.gettempdir(), out_name)
+                            out_tmp = os.path.join(vg_dir, out_name)
                             overall_status.markdown(
                                 f"Video **{video_idx+1}/{len(videos)}** • "
                                 f"Variant **{variant['name']}** • "
@@ -1295,6 +1364,9 @@ with tab2:
                                 add_blank_intro=variant["add_intro"],
                                 blank_intro_sec=variant["intro_sec"],
                                 overlay_img_path=overlay_img_path,
+                                border_hex=border_hex,
+                                border_thick=border_thick,
+                                border_margin=border_margin,
                             )
                             if cmd is None:
                                 st.error(f"Failed to build command for variant {variant['name']}")
@@ -1336,40 +1408,27 @@ with tab2:
                         except Exception:
                             pass
 
-                # ---- Final ZIP download ----
-                st.markdown("---\n# 📦 Done")
+                # Results are parked in session_state and rendered further down.
+                # Clicking a download button reruns the script, so anything drawn
+                # inside this `if run_btn` branch would vanish on the first click.
                 if all_generated_files:
-                    zip_buffer = BytesIO()
-                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                        for fi in all_generated_files:
-                            try:
-                                zf.write(fi["path"], fi["name"])
-                            except Exception as e:
-                                st.warning(f"Could not add {fi['name']}: {e}")
-                    zip_buffer.seek(0)
-                    zip_filename = f"TikTok_Variants_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.zip"
-                    st.success(f"🎉 {len(all_generated_files)} variant(s) generated!")
-                    st.balloons()
-                    st.download_button(
-                        label=f"⬇️ Download all variants ({len(all_generated_files)} files)",
-                        data=zip_buffer,
-                        file_name=zip_filename,
-                        mime="application/zip",
-                        key="vg_download_zip",
-                    )
-                    for fi in all_generated_files:
+                    st.session_state.vg_results = {
+                        "batch": vg_batch,
+                        "dir": vg_dir,
+                        "files": all_generated_files,
+                        "when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    }
+                else:
+                    st.session_state.vg_results = None
+                    st.error("No videos were successfully generated.")
+
+                # only the uploaded hook/overlay inputs are temporary
+                for p in [hook_img_path, hook_vid_path, overlay_img_path]:
+                    if p:
                         try:
-                            os.unlink(fi["path"])
+                            os.unlink(p)
                         except Exception:
                             pass
-                    for p in [hook_img_path, hook_vid_path, overlay_img_path]:
-                        if p:
-                            try:
-                                os.unlink(p)
-                            except Exception:
-                                pass
-                else:
-                    st.error("No videos were successfully generated.")
 
             except Exception as e:
                 st.error(f"FATAL: {e}\n{traceback.format_exc()}")
@@ -1384,8 +1443,50 @@ with tab2:
 | 2 | + Invisible black intro (0.01s) + Hook (0.1s) |
 | 3 | Variant 2 + Audio pitch +1% |
 | 4 | Variant 2 + Audio pitch −1% |
-| 5 | + Custom overlay/border PNG |
+| 5 | + Colour border (yellow/blue/orange/green/…) or a custom overlay PNG |
         """)
+
+    # ---- Results — persisted, so a download click can't wipe them ----------
+    _vg = st.session_state.get("vg_results")
+    if _vg:
+        alive = [f for f in _vg["files"] if os.path.exists(f["path"])]
+        st.markdown("---")
+        _r1, _r2 = st.columns([4, 1])
+        with _r1:
+            st.subheader(f"📦 Variants ready — {len(alive)} file(s)")
+            st.caption(f"Batch {_vg['batch']} · generated {_vg['when']} · kept in `{_vg['dir']}`")
+        with _r2:
+            if st.button("🗑️ Clear", key="vg_clear", use_container_width=True):
+                shutil.rmtree(_vg["dir"], ignore_errors=True)
+                st.session_state.vg_results = None
+                st.rerun()
+
+        if not alive:
+            st.warning("Those files are no longer on disk. Generate them again.")
+        else:
+            _zip_path = os.path.join(_vg["dir"], f"TikTok_Variants_{_vg['batch']}.zip")
+            if not os.path.exists(_zip_path):
+                with zipfile.ZipFile(_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for fi in alive:
+                        zf.write(fi["path"], fi["name"])
+            with open(_zip_path, "rb") as fh:
+                st.download_button(
+                    f"⬇️ Download all {len(alive)} variants as ZIP",
+                    data=fh.read(),
+                    file_name=os.path.basename(_zip_path),
+                    mime="application/zip",
+                    type="primary",
+                    use_container_width=True,
+                    key="vg_dl_zip",
+                )
+            with st.expander("Download individual files"):
+                for _i, fi in enumerate(alive):
+                    _c1, _c2 = st.columns([3, 1])
+                    _c1.markdown(f"**{fi['name']}** — {os.path.getsize(fi['path'])/1048576:.1f} MB")
+                    with open(fi["path"], "rb") as fh:
+                        _c2.download_button("⬇️", data=fh.read(), file_name=fi["name"],
+                                            mime="video/mp4", key=f"vg_dl_{_i}",
+                                            use_container_width=True)
 
 
 # ============================================================
@@ -1394,9 +1495,10 @@ with tab2:
 with tab3:
     st.header("🔄 Refresh Metadata")
     st.markdown(
-        "Upload videos you already downloaded from TikTok and re-export them with "
-        "**brand-new metadata + a unique digital fingerprint** — so they look fresh "
-        "to the algorithm when you re-upload them."
+        "Upload **videos or photos** and re-export them with **brand-new metadata + a "
+        "unique digital fingerprint** — so they look fresh to the algorithm when you "
+        "re-upload them. Every file in a batch gets the same iPhone, a different Saudi "
+        "city, and a believable Riyadh-time capture stamp."
     )
 
     # ---- Device / location pools ----------------------------------
@@ -1557,11 +1659,107 @@ with tab3:
         ]
         return cmd, meta_info
 
+    RM_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff", ".bmp"}
+
+    def rm_is_image(name):
+        return os.path.splitext(name)[1].lower() in RM_IMAGE_EXT
+
+    def rm_deg_to_dms_rational(value):
+        """Decimal degrees -> EXIF ((d,1),(m,1),(s,10000)) rationals."""
+        value = abs(float(value))
+        d = int(value)
+        m = int((value - d) * 60)
+        sec = round((value - d - m / 60.0) * 3600.0, 4)
+        return ((d, 1), (m, 1), (int(sec * 10000), 10000))
+
+    def rm_refresh_image(in_path, out_path, device_profile, city_name, lat, lon,
+                         days_ago_max=10, do_visual=True, intensity="Medium", quality=95):
+        """
+        Strip an image's metadata and write a fresh, self-consistent EXIF block:
+        same iPhone as the rest of the batch, a Saudi city, and a believable
+        Riyadh-time capture stamp. Optionally nudges pixels so the file hash
+        changes too, which is the whole point of a 'refresh'.
+        """
+        import piexif
+        from PIL import Image as _Im
+
+        lat_j = lat + random.uniform(-0.04, 0.04)
+        lon_j = lon + random.uniform(-0.04, 0.04)
+        local_dt, utc_dt = rm_random_riyadh_datetime(days_ago_max)
+
+        img = _Im.open(in_path)
+        try:
+            from PIL import ImageOps as _IOps
+            img = _IOps.exif_transpose(img)          # bake in rotation, then drop the tag
+        except Exception:
+            pass
+        img = img.convert("RGB")
+
+        if do_visual:
+            from PIL import ImageEnhance as _IE
+            amt = {"Light": 0.004, "Medium": 0.010, "Strong": 0.020}.get(intensity, 0.010)
+            img = _IE.Brightness(img).enhance(1 + random.uniform(-amt, amt))
+            img = _IE.Contrast(img).enhance(1 + random.uniform(-amt, amt))
+            img = _IE.Color(img).enhance(1 + random.uniform(-amt, amt))
+            # a 1px edge crop shifts every downstream hash without being visible
+            w, h = img.size
+            if w > 8 and h > 8:
+                img = img.crop((1, 1, w - 1, h - 1)).resize((w, h), _Im.LANCZOS)
+
+        uid = uuid.uuid4().hex
+        dt_str = local_dt.strftime("%Y:%m:%d %H:%M:%S")
+
+        zeroth = {
+            piexif.ImageIFD.Make: device_profile["make"],
+            piexif.ImageIFD.Model: device_profile["model"],
+            piexif.ImageIFD.Software: device_profile["software"],
+            piexif.ImageIFD.DateTime: dt_str,
+            piexif.ImageIFD.XResolution: (72, 1),
+            piexif.ImageIFD.YResolution: (72, 1),
+            piexif.ImageIFD.ResolutionUnit: 2,
+            piexif.ImageIFD.Orientation: 1,
+        }
+        exif = {
+            piexif.ExifIFD.DateTimeOriginal: dt_str,
+            piexif.ExifIFD.DateTimeDigitized: dt_str,
+            piexif.ExifIFD.OffsetTime: "+03:00",
+            piexif.ExifIFD.OffsetTimeOriginal: "+03:00",
+            piexif.ExifIFD.LensMake: device_profile["make"],
+            piexif.ExifIFD.LensModel: f"{device_profile['model']} back camera",
+            piexif.ExifIFD.ImageUniqueID: uid,
+            piexif.ExifIFD.ColorSpace: 1,
+            piexif.ExifIFD.PixelXDimension: img.size[0],
+            piexif.ExifIFD.PixelYDimension: img.size[1],
+        }
+        gps = {
+            piexif.GPSIFD.GPSVersionID: (2, 3, 0, 0),
+            piexif.GPSIFD.GPSLatitudeRef: "N" if lat_j >= 0 else "S",
+            piexif.GPSIFD.GPSLatitude: rm_deg_to_dms_rational(lat_j),
+            piexif.GPSIFD.GPSLongitudeRef: "E" if lon_j >= 0 else "W",
+            piexif.GPSIFD.GPSLongitude: rm_deg_to_dms_rational(lon_j),
+            piexif.GPSIFD.GPSAltitudeRef: 0,
+            piexif.GPSIFD.GPSAltitude: (int(random.uniform(5, 700) * 100), 100),
+            piexif.GPSIFD.GPSDateStamp: utc_dt.strftime("%Y:%m:%d"),
+        }
+        exif_bytes = piexif.dump({"0th": zeroth, "Exif": exif, "GPS": gps,
+                                  "1st": {}, "thumbnail": None})
+        img.save(out_path, "JPEG", quality=int(quality), subsampling=0,
+                 optimize=True, exif=exif_bytes)
+
+        return {
+            "device":   f"{device_profile['make']} {device_profile['model']}",
+            "software": device_profile["software"],
+            "location": f"{city_name}, Saudi Arabia",
+            "date":     local_dt.strftime("%Y-%m-%d %H:%M") + " (KSA time)",
+            "id":       uid[:12],
+        }
+
     # ---- UI -----------------------------------------------------------
-    st.subheader("Step 1 — Upload Videos")
+    st.subheader("Step 1 — Upload Videos or Photos")
     rm_files = st.file_uploader(
-        "Upload one or more videos (already downloaded from TikTok)",
-        type=["mp4", "mov", "avi", "mkv", "webm"],
+        "Upload videos **or photos** — each one comes out looking like a fresh capture",
+        type=["mp4", "mov", "avi", "mkv", "webm",
+              "jpg", "jpeg", "png", "webp", "tiff", "bmp"],
         accept_multiple_files=True,
         key="rm_files",
     )
@@ -1609,7 +1807,7 @@ with tab3:
     )
 
     st.subheader("Step 3 — Refresh")
-    rm_go = st.button("🔄 Refresh Metadata for All Videos", use_container_width=True,
+    rm_go = st.button("🔄 Refresh Metadata for All Files", use_container_width=True,
                        disabled=not rm_files)
 
     if rm_go and rm_files:
@@ -1631,13 +1829,40 @@ with tab3:
             with open(in_path, "wb") as f:
                 f.write(rm_file.getbuffer())
 
-            out_name = rm_random_filename(ext="mp4")
+            _is_img = rm_is_image(rm_file.name)
+            out_name = rm_random_filename(ext="jpg" if _is_img else "mp4")
             out_path = os.path.join(tempfile.gettempdir(), out_name)
 
             try:
                 city_name, city_lat, city_lon = rm_city_pool[idx % len(rm_city_pool)]
-                # Spread videos across the last ~10 days so timestamps look natural
-                days_ago_max = max(1, min(10, total))
+                # Spread files across the last ~N days so timestamps look natural
+                days_ago_max = max(1, min(int(PARAMS.get("meta_days_back", 10)), total))
+
+                if _is_img:
+                    try:
+                        meta_info = rm_refresh_image(
+                            in_path, out_path, rm_device, city_name, city_lat, city_lon,
+                            days_ago_max, do_visual=rm_do_visual, intensity=rm_intensity,
+                        )
+                        st.success(f"✅ `{rm_file.name}` → `{out_name}`")
+                        st.markdown(
+                            f"&nbsp;&nbsp;📱 **{meta_info['device']}** ({meta_info['software']}) "
+                            f"• 📍 {meta_info['location']} • 🗓️ {meta_info['date']} "
+                            f"• 🆔 `{meta_info['id']}`"
+                        )
+                        rm_results.append({"path": out_path, "name": out_name})
+                    except ImportError:
+                        st.error("Photo support needs the EXIF library — run "
+                                 "`pip install piexif` and restart the app.")
+                    except Exception as e:
+                        st.error(f"❌ Couldn't refresh `{rm_file.name}`: {e}")
+                    overall.progress((idx + 1) / total)
+                    try:
+                        os.unlink(in_path)
+                    except Exception:
+                        pass
+                    continue
+
                 cmd, meta_info = rm_build_cmd(
                     in_path, out_path, rm_intensity, rm_do_visual, rm_do_audio, rm_bitrate,
                     rm_device, city_name, city_lat, city_lon, days_ago_max
@@ -1692,10 +1917,10 @@ with tab3:
                         st.warning(f"Could not add {r['name']}: {e}")
             zip_buf.seek(0)
 
-            st.success(f"🎉 {len(rm_results)}/{total} video(s) refreshed and ready!")
+            st.success(f"🎉 {len(rm_results)}/{total} file(s) refreshed and ready!")
             st.balloons()
             st.download_button(
-                label=f"⬇️ Download Refreshed Videos ({len(rm_results)} files)",
+                label=f"⬇️ Download Refreshed Files ({len(rm_results)} files)",
                 data=zip_buf,
                 file_name=f"Refreshed_Videos_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.zip",
                 mime="application/zip",
@@ -2575,134 +2800,125 @@ with tab7:
             key="ds_files",
         )
 
-        # ── Step 2 — what to do ─────────────────────────────
+        # ── Step 2 — what to do (Canva-style: one click, details optional) ──
         st.subheader("Step 2 — What do you want to do?")
-        ds_do_bg = st.checkbox("🧽 Remove the background", value=True, key="ds_do_bg")
-        ds_do_up = st.checkbox("🔍 Increase quality & resolution", value=True, key="ds_do_up")
+
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            ds_do_bg = st.toggle("🧽 Remove the background", value=True, key="ds_do_bg")
+        with _c2:
+            ds_do_up = st.toggle("✨ Upscale & enhance quality", value=False, key="ds_do_up")
+
+        # Engine picks itself: AI when it's installed, colour-key otherwise.
+        ds_engine = "AI cutout" if _ds_ai else "Flat background"
 
         if ds_do_bg:
-            st.markdown("**Background removal**")
-            engine_opts = ["Flat background (fast — logos, mockups, flat designs)"]
             if _ds_ai:
-                engine_opts.insert(0, "AI cutout (best — photos, people, complex edges)")
-            ds_engine = st.selectbox("Method", engine_opts, key="ds_engine")
-
-            if ds_engine.startswith("AI"):
-                ds_c1, ds_c2 = st.columns(2)
-                with ds_c1:
-                    ds_model = st.selectbox(
-                        "Model",
-                        ["u2net", "isnet-general-use", "u2netp", "silueta"],
-                        help="u2net = balanced • isnet = sharpest edges • u2netp/silueta = lighter & faster",
-                        key="ds_model",
-                    )
-                with ds_c2:
-                    ds_matting = st.checkbox(
-                        "Refine edges (alpha matting)", value=False,
-                        help="Much better on hair and soft edges. Noticeably slower.",
-                        key="ds_matting",
-                    )
-                ds_tol = ds_feather = ds_shrink = 0
-                ds_decon = ds_protect = False
+                st.caption("🤖 Using the AI cutout engine — works on photos, people and hair.")
             else:
-                if not _ds_ai:
-                    st.caption(
-                        "💡 Want AI-quality cutouts for photos and people? Install the engine "
-                        "with `pip install rembg` and restart the app — a new option appears here."
-                    )
-                # Presets first — "Strong" is the default so a clean cut-out
-                # is what you get without touching a single slider.
-                DS_PRESETS = {
-                    "Gentle":   (14, 0.4, 0),
-                    "Balanced": (24, 0.6, 1),
-                    "Strong (recommended)": (36, 0.8, 2),
-                    "Maximum":  (52, 1.0, 3),
-                }
-                ds_preset = st.select_slider(
-                    "Cleanup strength",
-                    options=list(DS_PRESETS.keys()) + ["Custom"],
-                    value=PARAMS.get("design_preset", "Strong (recommended)"),
-                    key="ds_preset",
-                    help="Start at Strong. Go up to Maximum if any background survives; "
-                         "drop to Balanced/Gentle if the design itself gets eaten.",
+                st.caption(
+                    "Using the fast flat-background engine — great for logos and product "
+                    "shots on a plain backdrop. For photos and people, install the AI engine "
+                    "with `pip install rembg` and restart; it then gets picked automatically."
                 )
-                if ds_preset == "Custom":
-                    ds_b1, ds_b2, ds_b3 = st.columns(3)
-                    with ds_b1:
-                        ds_tol = st.slider("Tolerance", 1, 80, 36, key="ds_tol",
-                                           help="How different from the background a pixel must be to be kept. Raise it if bits of background survive.")
-                    with ds_b2:
-                        ds_feather = st.slider("Edge softness", 0.0, 3.0, 0.8, 0.1, key="ds_feather")
-                    with ds_b3:
-                        ds_shrink = st.select_slider("Trim halo", options=[0, 1, 2, 3], value=2, key="ds_shrink",
-                                                     help="Shaves the leftover background fringe around the edge.")
-                else:
-                    ds_tol, ds_feather, ds_shrink = DS_PRESETS[ds_preset]
-
-                ds_q1, ds_q2 = st.columns(2)
-                with ds_q1:
-                    ds_decon = st.checkbox(
-                        "🎯 Kill colour fringe", value=True, key="ds_decon",
-                        help="Un-blends the old background out of the semi-transparent edge "
-                             "pixels. This is what removes the green/grey outline around a cut-out.",
-                    )
-                with ds_q2:
-                    ds_protect = st.checkbox(
-                        "🛡️ Protect design interior", value=True, key="ds_protect",
-                        help="Only removes background that touches the edge of the image, so a "
-                             "high strength can't punch holes through light areas of your design.",
-                    )
-                ds_model, ds_matting = "u2net", False
-
             ds_bg_mode = st.radio(
-                "New background",
-                ["Transparent (PNG)", "White", "Black", "Custom colour"],
+                "Background", ["Transparent (PNG)", "White", "Black", "Custom colour"],
                 horizontal=True, key="ds_bg_mode",
             )
-            ds_bg_hex = st.color_picker("Pick a colour", "#FFFFFF", key="ds_bg_hex") \
-                if ds_bg_mode == "Custom colour" else "#FFFFFF"
+            ds_bg_hex = (st.color_picker("Pick a colour", "#FFFFFF", key="ds_bg_hex")
+                         if ds_bg_mode == "Custom colour" else "#FFFFFF")
         else:
-            ds_engine, ds_model, ds_matting = "", "u2net", False
-            ds_tol, ds_feather, ds_shrink = 36, 0.8, 2
-            ds_decon, ds_protect = True, True
             ds_bg_mode, ds_bg_hex = "Transparent (PNG)", "#FFFFFF"
 
         if ds_do_up:
-            st.markdown("**Quality & resolution**")
-            ds_u1, ds_u2 = st.columns(2)
-            with ds_u1:
-                ds_scale_mode = st.radio("Resize by", ["Multiplier", "Exact width"],
-                                         horizontal=True, key="ds_scale_mode")
-                if ds_scale_mode == "Multiplier":
-                    ds_mult = st.select_slider("Scale", options=[1, 2, 3, 4, 6, 8], value=2, key="ds_mult")
-                    ds_target_w = 0
-                else:
-                    ds_target_w = st.number_input("Target width (px)", 100, 12000, 2048, 64, key="ds_target_w")
-                    ds_mult = 1
-            with ds_u2:
-                ds_sharpen = st.slider("Sharpening", 0, 250, 110, 10, key="ds_sharpen",
-                                       help="Counteracts the softness that any upscale introduces.")
-                ds_denoise = st.checkbox("Smooth out noise / JPEG artefacts", value=False, key="ds_denoise")
-
-            ds_e1, ds_e2 = st.columns(2)
-            with ds_e1:
-                ds_contrast = st.slider("Contrast", 0.5, 2.0, 1.0, 0.05, key="ds_contrast")
-            with ds_e2:
-                ds_saturation = st.slider("Colour punch", 0.0, 2.0, 1.0, 0.05, key="ds_saturation")
+            _u1, _u2 = st.columns(2)
+            with _u1:
+                _mult_label = st.select_slider(
+                    "How much bigger?", options=["2×", "3×", "4×", "6×", "8×"],
+                    value="2×", key="ds_mult_label",
+                )
+                ds_mult = int(_mult_label[0])
+            with _u2:
+                _q = st.select_slider(
+                    "Enhancement", options=["Subtle", "Balanced", "Punchy"],
+                    value="Balanced", key="ds_quality_level",
+                )
+            _QP = {"Subtle":   (70,  1.00, 1.00),
+                   "Balanced": (110, 1.05, 1.05),
+                   "Punchy":   (170, 1.14, 1.18)}
+            ds_sharpen, ds_contrast, ds_saturation = _QP[_q]
+            ds_scale_mode, ds_target_w, ds_denoise = "Multiplier", 0, False
         else:
             ds_scale_mode, ds_mult, ds_target_w = "Multiplier", 1, 0
             ds_sharpen, ds_denoise, ds_contrast, ds_saturation = 0, False, 1.0, 1.0
 
-        # ── Step 3 — output ─────────────────────────────────
-        st.subheader("Step 3 — Output")
-        ds_o1, ds_o2 = st.columns(2)
-        with ds_o1:
-            _fmt_default = 0 if (ds_do_bg and ds_bg_mode == "Transparent (PNG)") else 0
-            ds_fmt = st.selectbox("Format", ["PNG", "JPG", "WEBP"], index=_fmt_default, key="ds_fmt",
-                                  help="PNG and WEBP keep transparency. JPG does not.")
-        with ds_o2:
-            ds_quality = st.slider("Quality (JPG / WEBP)", 60, 100, 95, key="ds_quality",
-                                   disabled=(ds_fmt == "PNG"))
+        # ── Output + everything fiddly, tucked away ─────────
+        with st.expander("⚙️ Advanced settings"):
+            _o1, _o2 = st.columns(2)
+            with _o1:
+                ds_fmt = st.selectbox("Format", ["PNG", "JPG", "WEBP"], index=0, key="ds_fmt",
+                                      help="PNG and WEBP keep transparency. JPG does not.")
+            with _o2:
+                ds_quality = st.slider("Quality (JPG / WEBP)", 60, 100, 95, key="ds_quality",
+                                       disabled=(ds_fmt == "PNG"))
+
+            if ds_do_bg and _ds_ai:
+                st.markdown("**AI cutout**")
+                _a1, _a2 = st.columns(2)
+                with _a1:
+                    ds_model = st.selectbox(
+                        "Model", ["u2net", "isnet-general-use", "u2netp", "silueta"],
+                        help="u2net = balanced • isnet = sharpest edges • u2netp/silueta = faster",
+                        key="ds_model",
+                    )
+                with _a2:
+                    ds_matting = st.checkbox(
+                        "Refine edges (hair, soft edges)", value=False, key="ds_matting",
+                        help="Noticeably better on hair. Slower.",
+                    )
+                ds_preset = "Strong (recommended)"
+                ds_tol, ds_feather, ds_shrink = 36, 0.8, 2
+                ds_decon = ds_protect = False
+            elif ds_do_bg:
+                st.markdown("**Flat-background cutout**")
+                DS_PRESETS = {"Gentle": (14, 0.4, 0), "Balanced": (24, 0.6, 1),
+                              "Strong (recommended)": (36, 0.8, 2), "Maximum": (52, 1.0, 3)}
+                ds_preset = st.select_slider(
+                    "Cleanup strength", options=list(DS_PRESETS.keys()) + ["Custom"],
+                    value=PARAMS.get("design_preset", "Strong (recommended)"), key="ds_preset",
+                    help="Go up to Maximum if any background survives; drop to Balanced/Gentle "
+                         "if the design itself gets eaten.",
+                )
+                if ds_preset == "Custom":
+                    _b1, _b2, _b3 = st.columns(3)
+                    ds_tol = _b1.slider("Tolerance", 1, 80, 36, key="ds_tol")
+                    ds_feather = _b2.slider("Edge softness", 0.0, 3.0, 0.8, 0.1, key="ds_feather")
+                    ds_shrink = _b3.select_slider("Trim halo", options=[0,1,2,3], value=2, key="ds_shrink")
+                else:
+                    ds_tol, ds_feather, ds_shrink = DS_PRESETS[ds_preset]
+                _q1, _q2 = st.columns(2)
+                ds_decon = _q1.checkbox("Kill colour fringe", value=True, key="ds_decon",
+                    help="Un-blends the old background out of edge pixels — removes the "
+                         "coloured halo around a cut-out.")
+                ds_protect = _q2.checkbox("Protect design interior", value=True, key="ds_protect",
+                    help="Only removes background touching the edge, so light areas inside "
+                         "your design can't get punched out.")
+                ds_model, ds_matting = "u2net", False
+            else:
+                ds_model, ds_matting = "u2net", False
+                ds_preset = "Strong (recommended)"
+                ds_tol, ds_feather, ds_shrink = 36, 0.8, 2
+                ds_decon = ds_protect = True
+
+            if ds_do_up:
+                st.markdown("**Upscaling**")
+                ds_denoise = st.checkbox("Smooth out noise / JPEG artefacts", value=False,
+                                         key="ds_denoise")
+                _e1, _e2 = st.columns(2)
+                ds_target_w = _e1.number_input("Or force an exact width (px, 0 = off)",
+                                               0, 12000, 0, 64, key="ds_target_w")
+                if ds_target_w:
+                    ds_scale_mode = "Exact width"
 
         if ds_do_bg and ds_bg_mode == "Transparent (PNG)" and ds_fmt == "JPG":
             st.warning("JPG can't store transparency — the cut-out background will come out white.")
