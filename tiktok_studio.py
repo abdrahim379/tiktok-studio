@@ -38,140 +38,141 @@ st.set_page_config(
 )
 
 # ── Brand system ────────────────────────────────────────────────────────
-# Duotone: TikTok cyan (#25F4EE) + magenta (#FE2C55) on a near-black base.
-# Cyan carries interaction (focus, hover, progress), magenta carries
-# identity and primary actions; everything else stays neutral so the two
-# accents never compete.
+# Soft, light SaaS palette in the Shopify Polaris family: a muted indigo
+# carries actions, a soft teal supports it, and everything else is warm
+# neutrals. Low saturation throughout so nothing shouts; hierarchy comes
+# from weight, spacing and hairline borders rather than colour.
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 :root{
-  --ts-bg:#08090D; --ts-surface:#12141C; --ts-surface2:#191C26;
-  --ts-border:#262A38; --ts-border-lit:#333949;
-  --ts-text:#ECEEF4; --ts-muted:#8A91A6;
-  --ts-cyan:#25F4EE; --ts-pink:#FE2C55;
-  --ts-grad:linear-gradient(120deg,#25F4EE 0%,#48C6EF 42%,#FE2C55 100%);
+  --ts-bg:#F6F7F9; --ts-surface:#FFFFFF; --ts-surface2:#F4F6F8;
+  --ts-border:#E3E7EC; --ts-border-lit:#C9D2DC;
+  --ts-text:#212B36; --ts-muted:#637381;
+  --ts-cyan:#5C6AC4;                 /* primary indigo */
+  --ts-indigo-dark:#4A57B0; --ts-indigo-soft:#EEF0FB;
+  --ts-teal:#47C1BF; --ts-teal-soft:#E8F6F6;
+  --ts-grad:linear-gradient(120deg,#5C6AC4 0%,#6F7BD1 55%,#47C1BF 100%);
+  --ts-shadow:0 1px 2px rgba(33,43,54,.07), 0 1px 3px rgba(33,43,54,.05);
+  --ts-shadow-lg:0 2px 6px rgba(33,43,54,.08), 0 8px 20px rgba(33,43,54,.06);
   --ts-font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
-  --ts-r:14px;
+  --ts-r:10px;
 }
 
 .stApp{background:var(--ts-bg);}
 html,body,.stApp,[class*="css"]{font-family:var(--ts-font)!important;color:var(--ts-text);}
 [data-testid="stHeader"]{background:transparent;}
-[data-testid="stDecoration"]{background:var(--ts-grad);height:3px;}
-.block-container{padding-top:2.2rem;max-width:1500px;}
+[data-testid="stDecoration"]{background:var(--ts-grad);height:2px;}
+.block-container{padding-top:2rem;max-width:1440px;}
 
 /* ── Hero ─────────────────────────────────────────────── */
-.ts-hero{display:flex;align-items:center;gap:20px;flex-wrap:wrap;
-  padding:26px 30px;margin-bottom:20px;border-radius:20px;
-  background:radial-gradient(1200px 240px at 0% 0%,rgba(37,244,238,.10),transparent 60%),
-             radial-gradient(900px 240px at 100% 100%,rgba(254,44,85,.12),transparent 60%),
-             var(--ts-surface);
-  border:1px solid var(--ts-border);}
-.ts-mark{width:56px;height:56px;flex:0 0 56px;border-radius:17px;display:grid;place-items:center;
-  font-size:28px;background:var(--ts-grad);box-shadow:0 8px 26px rgba(254,44,85,.28);}
-.ts-name{font-size:2.05rem;font-weight:800;letter-spacing:-.028em;line-height:1.1;margin:0;}
-.ts-name span{background:var(--ts-grad);-webkit-background-clip:text;background-clip:text;
-  -webkit-text-fill-color:transparent;}
-.ts-tag{margin:5px 0 0;color:var(--ts-muted);font-size:.95rem;font-weight:450;}
+.ts-hero{display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+  padding:22px 26px;margin-bottom:20px;border-radius:14px;
+  background:var(--ts-surface);border:1px solid var(--ts-border);
+  box-shadow:var(--ts-shadow);}
+.ts-mark{width:48px;height:48px;flex:0 0 48px;border-radius:13px;display:grid;place-items:center;
+  font-size:24px;background:var(--ts-indigo-soft);border:1px solid #DFE3F7;}
+.ts-name{font-size:1.6rem;font-weight:700;letter-spacing:-.02em;line-height:1.15;margin:0;
+  color:var(--ts-text);}
+.ts-name span{color:var(--ts-cyan);}
+.ts-tag{margin:4px 0 0;color:var(--ts-muted);font-size:.9rem;font-weight:400;}
 .ts-tag b{color:var(--ts-text);font-weight:600;}
-.ts-pill{margin-left:auto;padding:7px 15px;border-radius:999px;font-size:.72rem;font-weight:700;
-  letter-spacing:.10em;color:var(--ts-cyan);background:rgba(37,244,238,.09);
-  border:1px solid rgba(37,244,238,.28);white-space:nowrap;}
+.ts-pill{margin-left:auto;padding:6px 13px;border-radius:999px;font-size:.7rem;font-weight:600;
+  letter-spacing:.07em;color:var(--ts-cyan);background:var(--ts-indigo-soft);
+  border:1px solid #DFE3F7;white-space:nowrap;}
 
 /* ── Tabs ─────────────────────────────────────────────── */
-.stTabs [data-baseweb="tab-list"]{gap:8px;flex-wrap:wrap;background:transparent;
-  border-bottom:1px solid var(--ts-border);padding-bottom:12px;margin-bottom:8px;}
-.stTabs [data-baseweb="tab"]{height:auto;padding:10px 17px;border-radius:11px;
-  background:var(--ts-surface);border:1px solid var(--ts-border);
-  color:var(--ts-muted)!important;font-weight:600;font-size:.9rem;letter-spacing:-.01em;
-  transition:all .16s ease;}
-.stTabs [data-baseweb="tab"]:hover{background:var(--ts-surface2);color:var(--ts-text)!important;
-  border-color:var(--ts-border-lit);transform:translateY(-1px);}
-.stTabs [aria-selected="true"]{background:var(--ts-grad)!important;border-color:transparent!important;
-  color:#06080C!important;font-weight:700;box-shadow:0 6px 20px rgba(37,244,238,.18);}
-.stTabs [aria-selected="true"] p{color:#06080C!important;font-weight:700;}
+.stTabs [data-baseweb="tab-list"]{gap:6px;flex-wrap:wrap;background:transparent;
+  border-bottom:1px solid var(--ts-border);padding-bottom:10px;margin-bottom:10px;}
+.stTabs [data-baseweb="tab"]{height:auto;padding:8px 14px;border-radius:8px;
+  background:transparent;border:1px solid transparent;
+  color:var(--ts-muted)!important;font-weight:500;font-size:.875rem;letter-spacing:-.005em;
+  transition:background .14s ease,color .14s ease,border-color .14s ease;}
+.stTabs [data-baseweb="tab"]:hover{background:var(--ts-surface2);color:var(--ts-text)!important;}
+.stTabs [aria-selected="true"]{background:var(--ts-surface)!important;
+  border-color:var(--ts-border)!important;color:var(--ts-cyan)!important;font-weight:600;
+  box-shadow:var(--ts-shadow);}
+.stTabs [aria-selected="true"] p{color:var(--ts-cyan)!important;font-weight:600;}
 .stTabs [data-baseweb="tab-highlight"],.stTabs [data-baseweb="tab-border"]{display:none;}
 
 /* ── Type ─────────────────────────────────────────────── */
-h1,h2,h3{letter-spacing:-.022em;font-weight:700;}
-h2{font-size:1.55rem;margin-top:.3rem;}
-h3{font-size:1.07rem;color:var(--ts-text);padding-left:12px;position:relative;margin-top:1.5rem;}
-h3::before{content:"";position:absolute;left:0;top:.22em;bottom:.22em;width:3px;
-  border-radius:3px;background:var(--ts-grad);}
+h1,h2,h3{letter-spacing:-.018em;font-weight:600;color:var(--ts-text);}
+h2{font-size:1.4rem;margin-top:.2rem;}
+h3{font-size:1rem;padding-left:11px;position:relative;margin-top:1.5rem;}
+h3::before{content:"";position:absolute;left:0;top:.25em;bottom:.25em;width:3px;
+  border-radius:3px;background:var(--ts-cyan);opacity:.55;}
 hr{border-color:var(--ts-border);}
 a{color:var(--ts-cyan)!important;}
 
 /* ── Buttons ──────────────────────────────────────────── */
 .stButton>button,.stDownloadButton>button,.stFormSubmitButton>button{
-  border-radius:11px;font-weight:600;font-size:.9rem;padding:.55rem 1.1rem;
-  background:var(--ts-surface2);color:var(--ts-text);border:1px solid var(--ts-border-lit);
-  transition:all .16s ease;}
+  border-radius:8px;font-weight:500;font-size:.875rem;padding:.5rem 1rem;
+  background:var(--ts-surface);color:var(--ts-text);border:1px solid var(--ts-border-lit);
+  box-shadow:var(--ts-shadow);transition:background .14s ease,border-color .14s ease;}
 .stButton>button:hover,.stDownloadButton>button:hover,.stFormSubmitButton>button:hover{
-  border-color:var(--ts-cyan);color:var(--ts-cyan);transform:translateY(-1px);
-  box-shadow:0 5px 18px rgba(37,244,238,.12);}
-.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"]{
-  background:var(--ts-grad);color:#06080C;border:none;font-weight:700;
-  box-shadow:0 6px 22px rgba(254,44,85,.26);}
-.stButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover{
-  filter:brightness(1.09);color:#06080C;transform:translateY(-1px);
-  box-shadow:0 9px 30px rgba(254,44,85,.36);}
-.stButton>button:disabled,.stDownloadButton>button:disabled{opacity:.4;transform:none;box-shadow:none;}
+  background:var(--ts-surface2);border-color:#AEB9C6;color:var(--ts-text);}
+.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"],
+.stDownloadButton>button[kind="primary"]{
+  background:var(--ts-cyan);color:#FFFFFF;border:1px solid var(--ts-indigo-dark);font-weight:600;}
+.stButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover,
+.stDownloadButton>button[kind="primary"]:hover{
+  background:var(--ts-indigo-dark);color:#FFFFFF;border-color:var(--ts-indigo-dark);}
+.stButton>button:disabled,.stDownloadButton>button:disabled{opacity:.5;box-shadow:none;}
 
 /* ── Inputs ───────────────────────────────────────────── */
 .stTextInput input,.stTextArea textarea,.stNumberInput input,
 [data-baseweb="select"]>div,[data-baseweb="input"]{
-  background:var(--ts-surface)!important;border:1px solid var(--ts-border)!important;
-  border-radius:11px!important;color:var(--ts-text)!important;}
+  background:var(--ts-surface)!important;border:1px solid var(--ts-border-lit)!important;
+  border-radius:8px!important;color:var(--ts-text)!important;}
 .stTextInput input:focus,.stTextArea textarea:focus,.stNumberInput input:focus{
-  border-color:var(--ts-cyan)!important;box-shadow:0 0 0 3px rgba(37,244,238,.13)!important;}
-[data-baseweb="select"]>div:hover{border-color:var(--ts-border-lit)!important;}
-.stTextArea textarea{font-size:.95rem;line-height:1.65;}
+  border-color:var(--ts-cyan)!important;box-shadow:0 0 0 3px rgba(92,106,196,.14)!important;}
+[data-baseweb="select"]>div:hover{border-color:#AEB9C6!important;}
+.stTextArea textarea{font-size:.9rem;line-height:1.6;}
 label,.stMarkdown p{color:var(--ts-text);}
-[data-testid="stWidgetLabel"] p{font-weight:600;font-size:.87rem;color:var(--ts-text);}
+[data-testid="stWidgetLabel"] p{font-weight:500;font-size:.85rem;color:var(--ts-text);}
 [data-testid="stCaptionContainer"],small{color:var(--ts-muted)!important;}
 
 /* ── Uploader ─────────────────────────────────────────── */
-[data-testid="stFileUploaderDropzone"]{background:var(--ts-surface);
-  border:1.5px dashed var(--ts-border-lit);border-radius:var(--ts-r);transition:all .18s ease;}
+[data-testid="stFileUploaderDropzone"]{background:var(--ts-surface2);
+  border:1px dashed var(--ts-border-lit);border-radius:var(--ts-r);transition:all .16s ease;}
 [data-testid="stFileUploaderDropzone"]:hover{border-color:var(--ts-cyan);
-  background:rgba(37,244,238,.035);}
+  background:var(--ts-indigo-soft);}
 
-/* ── Slider / progress ────────────────────────────────── */
+/* ── Slider / toggle / progress ───────────────────────── */
 .stSlider [data-baseweb="slider"] div[role="slider"]{background:var(--ts-cyan)!important;
-  border:2px solid #06080C!important;box-shadow:0 0 0 4px rgba(37,244,238,.18)!important;}
-.stProgress>div>div>div>div{background:var(--ts-grad);}
+  border:2px solid #FFFFFF!important;box-shadow:0 0 0 3px rgba(92,106,196,.18)!important;}
+.stProgress>div>div>div>div{background:var(--ts-cyan);}
 .stProgress>div>div>div{background:var(--ts-surface2);border-radius:999px;}
 
 /* ── Feedback ─────────────────────────────────────────── */
-[data-testid="stAlert"],.stAlert{border-radius:12px;border:1px solid var(--ts-border);
-  border-left-width:3px;background:var(--ts-surface);}
-[data-testid="stExpander"]{border:1px solid var(--ts-border);border-radius:12px;
-  background:var(--ts-surface);overflow:hidden;}
+[data-testid="stAlert"],.stAlert{border-radius:10px;border:1px solid var(--ts-border);
+  border-left:3px solid var(--ts-cyan);background:var(--ts-surface);
+  box-shadow:var(--ts-shadow);}
+[data-testid="stExpander"]{border:1px solid var(--ts-border);border-radius:10px;
+  background:var(--ts-surface);overflow:hidden;box-shadow:var(--ts-shadow);}
 [data-testid="stExpander"] summary:hover{color:var(--ts-cyan);}
 [data-testid="stMetric"]{background:var(--ts-surface);border:1px solid var(--ts-border);
-  border-radius:12px;padding:14px 16px;}
-[data-testid="stMetricValue"]{background:var(--ts-grad);-webkit-background-clip:text;
-  background-clip:text;-webkit-text-fill-color:transparent;font-weight:800;}
+  border-radius:10px;padding:13px 15px;box-shadow:var(--ts-shadow);}
+[data-testid="stMetricValue"]{color:var(--ts-cyan);font-weight:700;}
 .stCheckbox,.stRadio{color:var(--ts-text);}
-code{background:var(--ts-surface2)!important;color:var(--ts-cyan)!important;
-  border:1px solid var(--ts-border);border-radius:6px;padding:1px 6px;font-size:.86em;}
+code{background:var(--ts-surface2)!important;color:#B4468A!important;
+  border:1px solid var(--ts-border);border-radius:5px;padding:1px 5px;font-size:.85em;}
 [data-testid="stCodeBlock"] code{border:none;color:var(--ts-text)!important;}
-img{border-radius:10px;}
-audio{width:100%;filter:saturate(1.15);}
+img{border-radius:8px;}
+audio{width:100%;}
 
 /* Arabic scripts read right-to-left on their own */
 .stTextArea textarea{unicode-bidi:plaintext;}
 
-::-webkit-scrollbar{width:10px;height:10px;}
+::-webkit-scrollbar{width:11px;height:11px;}
 ::-webkit-scrollbar-track{background:var(--ts-bg);}
-::-webkit-scrollbar-thumb{background:var(--ts-border-lit);border-radius:8px;}
-::-webkit-scrollbar-thumb:hover{background:var(--ts-muted);}
+::-webkit-scrollbar-thumb{background:#CFD6DE;border-radius:8px;border:3px solid var(--ts-bg);}
+::-webkit-scrollbar-thumb:hover{background:#B4BEC9;}
 
 @media (max-width:760px){
-  .ts-hero{padding:20px;gap:14px;} .ts-name{font-size:1.6rem;}
-  .ts-pill{margin-left:0;} .block-container{padding-top:1.2rem;}
+  .ts-hero{padding:18px;gap:12px;} .ts-name{font-size:1.35rem;}
+  .ts-pill{margin-left:0;} .block-container{padding-top:1.1rem;}
 }
 </style>
 """, unsafe_allow_html=True)
@@ -727,7 +728,7 @@ with tab1:
 .dl-meta{font-size:10.5px;color:var(--ts-muted);}
 /* the per-card checkbox is driven by the card; keep it out of the way */
 .dl-grid-scope [data-testid="stCheckbox"]{height:0;overflow:hidden;margin:0;padding:0;}
-#dl-marquee{position:fixed;border:1.5px solid #25F4EE;background:rgba(37,244,238,.14);
+#dl-marquee{position:fixed;border:1.5px solid #5C6AC4;background:rgba(92,106,196,.12);
   border-radius:4px;pointer-events:none;z-index:99999;display:none;}
 .dl-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 14px;
   padding:10px 14px;border:1px solid var(--ts-border);border-radius:12px;
@@ -850,7 +851,7 @@ with tab1:
         const r = cell.getBoundingClientRect();
         const hit = !(r.right < x || r.left > x+w || r.bottom < y || r.top > y+h);
         const card = cell.querySelector('.dl-card');
-        if(card) card.style.outline = hit ? '2px solid #FE2C55' : '';
+        if(card) card.style.outline = hit ? '2px solid #47C1BF' : '';
       });
     });
 
@@ -946,7 +947,11 @@ with tab2:
     }
     TARGET_W, TARGET_H = 1080, 1920
     MAX_FPS = 120
-    SAFE_THREADS = ["-threads", "2"]
+    # Was hard-coded to 2 threads, which throttled encoding to roughly 40% of
+    # what this machine can do. 0 lets x264 use every core; the Options panel
+    # can dial it back if you want the laptop responsive while it runs.
+    VG_CPU_COUNT = os.cpu_count() or 4
+    SAFE_THREADS = ["-threads", "0"]
     TIME_RE = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
 
     # ---- Helpers ----
@@ -1209,6 +1214,14 @@ with tab2:
             use_ultra_stable = st.checkbox("Mode ultra-stable (libx264/veryfast)", value=True)
             use_hw_decode = st.checkbox("Hardware decode (Videotoolbox)", value=False)
             zoom_mode = st.radio("Creative zoom mode", ["zoom + crop", "zoom inverse + pad", "aucun"], index=0)
+            vg_threads = st.select_slider(
+                "Encoder threads",
+                options=["Auto (fastest)"] + [str(n) for n in (1, 2, 4, 6, 8, 12, 16) if n <= VG_CPU_COUNT],
+                value="Auto (fastest)",
+                help=f"This machine has {VG_CPU_COUNT} cores. Auto uses them all — that is the "
+                     f"fastest. Lower it only if you want to keep the laptop usable while encoding.",
+            )
+            SAFE_THREADS[:] = ["-threads", "0" if vg_threads.startswith("Auto") else vg_threads]
         with col_b:
             selected_variants = st.multiselect(
                 "Variants to generate",
@@ -1418,6 +1431,10 @@ with tab2:
                         "files": all_generated_files,
                         "when": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
                     }
+                    components.html(
+                        "<script>setTimeout(function(){var d=window.parent.document"
+                        ".getElementById('vg-done');if(d)d.scrollIntoView("
+                        "{behavior:'smooth',block:'center'});},400);</script>", height=0)
                 else:
                     st.session_state.vg_results = None
                     st.error("No videos were successfully generated.")
@@ -1451,15 +1468,16 @@ with tab2:
     if _vg:
         alive = [f for f in _vg["files"] if os.path.exists(f["path"])]
         st.markdown("---")
-        _r1, _r2 = st.columns([4, 1])
-        with _r1:
-            st.subheader(f"📦 Variants ready — {len(alive)} file(s)")
-            st.caption(f"Batch {_vg['batch']} · generated {_vg['when']} · kept in `{_vg['dir']}`")
-        with _r2:
-            if st.button("🗑️ Clear", key="vg_clear", use_container_width=True):
-                shutil.rmtree(_vg["dir"], ignore_errors=True)
-                st.session_state.vg_results = None
-                st.rerun()
+        st.markdown(
+            '<div id="vg-done" style="background:var(--ts-indigo-soft);'
+            'border:1px solid #DFE3F7;border-radius:12px;padding:16px 20px;margin:6px 0 14px;">'
+            f'<div style="font-size:1.05rem;font-weight:600;color:var(--ts-text);">'
+            f'✅ {len(alive)} variant(s) ready</div>'
+            f'<div style="color:var(--ts-muted);font-size:.85rem;margin-top:3px;">'
+            f'Batch {_vg["batch"]} · generated {_vg["when"]} · your download button is right below.'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
 
         if not alive:
             st.warning("Those files are no longer on disk. Generate them again.")
@@ -1479,6 +1497,11 @@ with tab2:
                     use_container_width=True,
                     key="vg_dl_zip",
                 )
+            if st.button("🗑️ Clear these results", key="vg_clear"):
+                shutil.rmtree(_vg["dir"], ignore_errors=True)
+                st.session_state.vg_results = None
+                st.rerun()
+
             with st.expander("Download individual files"):
                 for _i, fi in enumerate(alive):
                     _c1, _c2 = st.columns([3, 1])
