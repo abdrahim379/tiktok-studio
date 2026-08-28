@@ -11,12 +11,15 @@ import sys
 import json
 import datetime
 
+import time
+
 import streamlit as st
+import streamlit.components.v1 as components
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import studio_auth as auth
 
-st.set_page_config(page_title="Admin · TikTok Studio", page_icon="⚙️",
+st.set_page_config(page_title="Admin · Ecom Studio", page_icon="⚙️",
                    layout="wide", initial_sidebar_state="collapsed")
 
 # Same soft palette as the main app, plus hiding Streamlit's own page list so
@@ -82,9 +85,46 @@ code{background:var(--ts-surface2)!important;color:#B4468A!important;
 # ── sign-in gate ────────────────────────────────────────────────────────
 db = auth.load_db()
 
-if "admin_token" in st.query_params and not st.session_state.get("is_admin"):
-    if auth.resolve_token(st.query_params.get("admin_token")) == "__admin__":
+# Same cookie approach as the main app: the component iframe is sandboxed
+# without allow-top-navigation, so a redirect can't be used to restore a
+# session — a cookie read back via st.context.cookies can.
+_ADM_COOKIE = "ecom_studio_admin"
+
+
+def _adm_cookie():
+    try:
+        return st.context.cookies.get(_ADM_COOKIE) or ""
+    except Exception:
+        return ""
+
+
+def _adm_remember(tok):
+    components.html(
+        f"<script>try{{window.parent.document.cookie='{_ADM_COOKIE}=' + {tok!r} + "
+        f"';path=/;max-age={auth.SESSION_DAYS * 86400};samesite=Lax';}}catch(e){{}}</script>",
+        height=0)
+
+
+def _adm_forget():
+    components.html(
+        f"<script>try{{window.parent.document.cookie='{_ADM_COOKIE}=;path=/;"
+        f"max-age=0;samesite=Lax';}}catch(e){{}}</script>", height=0)
+
+
+if not st.session_state.get("is_admin"):
+    _at = _adm_cookie() or st.query_params.get("admin_token") or ""
+    if _at and auth.resolve_token(_at) == "__admin__":
         st.session_state.is_admin = True
+        st.session_state.admin_token = _at
+        _adm_remember(_at)
+        if "admin_token" in st.query_params:
+            del st.query_params["admin_token"]
+    elif _at:
+        auth.revoke_token(_at)
+        _adm_forget()
+        if "admin_token" in st.query_params:
+            del st.query_params["admin_token"]
+
 
 if not st.session_state.get("is_admin"):
     st.markdown(
@@ -99,7 +139,10 @@ if not st.session_state.get("is_admin"):
         if st.button("Sign in", type="primary", key="adm_go", use_container_width=True):
             if auth.authenticate_admin(db, u, p):
                 st.session_state.is_admin = True
-                st.query_params["admin_token"] = auth.issue_token("__admin__")
+                _tk = auth.issue_token("__admin__")
+                st.session_state.admin_token = _tk
+                _adm_remember(_tk)
+                time.sleep(0.4)
                 st.rerun()
             else:
                 st.error("Wrong username or password.")
@@ -138,9 +181,13 @@ if n_waiting:
 _top1, _top2 = st.columns([5, 1])
 with _top2:
     if st.button("Sign out", key="adm_out", use_container_width=True):
-        auth.revoke_token(st.query_params.get("admin_token"))
+        auth.revoke_token(st.session_state.get("admin_token")
+                          or st.query_params.get("admin_token"))
         st.session_state.is_admin = False
+        st.session_state.pop("admin_token", None)
         st.query_params.clear()
+        _adm_forget()
+        time.sleep(0.4)
         st.rerun()
 
 tab_users, tab_new, tab_bulk, tab_keys, tab_sys = st.tabs(
@@ -204,6 +251,8 @@ with tab_users:
                              key=f"act_{email}", use_container_width=True):
                     db["users"][email]["active"] = not rec.get("active", True)
                     auth.save_db(db)
+                    if not db["users"][email]["active"]:
+                        auth.revoke_all_for(email)     # kick them out now
                     st.rerun()
 
                 with a3.popover("🔑 Reset password", use_container_width=True):
@@ -212,7 +261,8 @@ with tab_users:
                         ok, msg = auth.set_password(db, email, npw)
                         if ok:
                             auth.save_db(db)
-                            st.success(msg)
+                            n = auth.revoke_all_for(email)
+                            st.success(msg + (f" Signed out {n} device(s)." if n else ""))
                         else:
                             st.error(msg)
 
@@ -221,6 +271,7 @@ with tab_users:
                     if st.button("Yes, delete", key=f"del_{email}"):
                         db["users"].pop(email, None)
                         auth.save_db(db)
+                        auth.revoke_all_for(email)
                         st.rerun()
 
 

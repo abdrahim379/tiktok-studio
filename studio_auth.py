@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Shared accounts + permissions for TikTok Studio.
+Shared accounts + permissions for Ecom Studio.
 
 Used by the main app (tiktok_studio.py) and the admin panel (pages/admin.py).
 
@@ -206,30 +206,88 @@ def api_key(db, name, *env_names):
     return "", "none"
 
 
-# ── sign-in that survives a page refresh ────────────────────────────────
-# Streamlit clears session_state on reload, which would sign everyone out on
-# every refresh. We hand the browser an opaque token in the URL and keep the
-# email server-side, so the URL never carries a password.
-_SESSIONS = {}
-_SESSION_HOURS = 12
+# ── staying signed in ───────────────────────────────────────────────────
+# Two things have to hold for a session to survive "close the tab and come
+# back later":
+#   1. the token must outlive the Python process, so it is written to disk
+#      rather than kept in a module-level dict (Streamlit Cloud restarts the
+#      app whenever it sleeps, which would have logged everyone out);
+#   2. the browser has to remember it without the URL, which the app layer
+#      does by mirroring the token into localStorage.
+# The token is an opaque random id — no password or email ever goes near the
+# URL. It is a bearer credential, so anyone holding it is that user until it
+# expires or is signed out.
+SESSION_FILE = os.environ.get("STUDIO_SESSIONS_DB", "studio_sessions.json")
+SESSION_DAYS = 30
+
+
+def _load_sessions():
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_sessions(data):
+    try:
+        tmp = SESSION_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, SESSION_FILE)
+        os.chmod(SESSION_FILE, 0o600)
+    except Exception:
+        pass                      # a read-only host just means shorter sessions
+
+
+def _prune(data):
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=SESSION_DAYS)
+    dead = [t for t, v in data.items()
+            if datetime.datetime.fromisoformat(v["issued"]) < cutoff]
+    for t in dead:
+        data.pop(t, None)
+    return data
 
 
 def issue_token(identity):
+    data = _prune(_load_sessions())
     tok = secrets.token_urlsafe(24)
-    _SESSIONS[tok] = (identity, datetime.datetime.now())
+    data[tok] = {"identity": identity,
+                 "issued": datetime.datetime.now().isoformat()}
+    _save_sessions(data)
     return tok
 
 
 def resolve_token(tok):
-    entry = _SESSIONS.get(tok or "")
+    if not tok:
+        return None
+    entry = _load_sessions().get(tok)
     if not entry:
         return None
-    identity, issued = entry
-    if (datetime.datetime.now() - issued).total_seconds() > _SESSION_HOURS * 3600:
-        _SESSIONS.pop(tok, None)
+    try:
+        issued = datetime.datetime.fromisoformat(entry["issued"])
+    except Exception:
         return None
-    return identity
+    if (datetime.datetime.now() - issued).days >= SESSION_DAYS:
+        revoke_token(tok)
+        return None
+    return entry.get("identity")
 
 
 def revoke_token(tok):
-    _SESSIONS.pop(tok or "", None)
+    if not tok:
+        return
+    data = _load_sessions()
+    if data.pop(tok, None) is not None:
+        _save_sessions(data)
+
+
+def revoke_all_for(identity):
+    """Used when an account is suspended, deleted or has its password reset."""
+    data = _load_sessions()
+    gone = [t for t, v in data.items() if v.get("identity") == identity]
+    for t in gone:
+        data.pop(t, None)
+    if gone:
+        _save_sessions(data)
+    return len(gone)

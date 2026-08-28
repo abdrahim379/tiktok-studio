@@ -93,7 +93,7 @@ def ffmpeg_probe(path):
     return w, h, fps, dur
 
 st.set_page_config(
-    page_title="TikTok Studio",
+    page_title="Ecom Studio",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -276,23 +276,66 @@ def cfg_api_key(name, *env_names):
     return auth.api_key(CFG, name, *env_names)
 
 
-# A token in the URL keeps you signed in across refreshes; the password is
-# never in the URL, only an opaque server-side session id.
+# Staying signed in.
+#
+# First attempt used localStorage plus a redirect, which does not work: the
+# component iframe is sandboxed WITHOUT allow-top-navigation, so the redirect
+# is silently blocked. Cookies avoid navigation entirely — the iframe writes
+# one on the parent document (allow-same-origin is granted) and Python reads
+# it back through st.context.cookies on the next run.
+_COOKIE = "ecom_studio_token"
+_COOKIE_DAYS = auth.SESSION_DAYS
+
+
+def _cookie_token():
+    try:
+        return st.context.cookies.get(_COOKIE) or ""
+    except Exception:
+        return ""
+
+
+def _remember_token(tok):
+    components.html(
+        f"<script>try{{window.parent.document.cookie="
+        f"'{_COOKIE}=' + {tok!r} + ';path=/;max-age={_COOKIE_DAYS * 86400};samesite=Lax';}}"
+        f"catch(e){{}}</script>", height=0)
+
+
+def _forget_token():
+    components.html(
+        f"<script>try{{window.parent.document.cookie="
+        f"'{_COOKIE}=;path=/;max-age=0;samesite=Lax';}}catch(e){{}}</script>", height=0)
+
+
 if not st.session_state.get("user_email"):
-    _tok = st.query_params.get("t")
+    # the cookie is the durable one; ?t= still works for a shared link
+    _tok = _cookie_token() or st.query_params.get("t") or ""
     _who = auth.resolve_token(_tok) if _tok else None
-    if _who and _who in CFG["users"]:
+    if _who and _who in CFG["users"] and CFG["users"][_who].get("active", True):
         st.session_state.user_email = _who
+        st.session_state.auth_token = _tok
+        _remember_token(_tok)          # refresh the expiry on every visit
+        if "t" in st.query_params:
+            del st.query_params["t"]   # keep it out of the address bar
+    elif _tok:
+        auth.revoke_token(_tok)        # stale or revoked
+        _forget_token()
+        if "t" in st.query_params:
+            del st.query_params["t"]
+
 
 def _sign_out():
-    auth.revoke_token(st.query_params.get("t"))
+    auth.revoke_token(st.session_state.get("auth_token") or st.query_params.get("t"))
     st.session_state.pop("user_email", None)
+    st.session_state.pop("auth_token", None)
     st.query_params.clear()
+    _forget_token()
+    time.sleep(0.4)           # let the browser apply the cookie deletion
     st.rerun()
 
 
 def _render_login():
-    render_hero("TikTok Studio", "Sign in to reach your tools", len(auth.TOOL_KEYS))
+    render_hero("Ecom Studio", "Sign in to reach your tools", len(auth.TOOL_KEYS))
     _left, _right = st.columns([1, 1])
 
     with _left:
@@ -304,7 +347,10 @@ def _render_login():
             if ok:
                 auth.save_db(CFG)                       # record the sign-in time
                 st.session_state.user_email = auth.normalise_email(_e)
-                st.query_params["t"] = auth.issue_token(st.session_state.user_email)
+                _new = auth.issue_token(st.session_state.user_email)
+                st.session_state.auth_token = _new
+                _remember_token(_new)
+                time.sleep(0.4)       # give the browser time to set the cookie
                 st.rerun()
             else:
                 st.error(msg)
@@ -343,7 +389,7 @@ if not USER or not USER.get("active", True):
 
 MY_TOOLS = auth.allowed_tools(CFG, USER_EMAIL)
 
-render_hero("TikTok Studio",
+render_hero("Ecom Studio",
             f"Signed in as <b>{USER.get('name', USER_EMAIL)}</b> — "
             f"{len(MY_TOOLS)} tool(s) available to you",
             len(MY_TOOLS))
@@ -1631,7 +1677,7 @@ with tab2:
             with _box:
                 if _is_latest:
                     st.caption(_hdr)
-                _zip_path = os.path.join(_b["dir"], f"TikTok_Variants_{_b['batch']}.zip")
+                _zip_path = os.path.join(_b["dir"], f"EcomStudio_Variants_{_b['batch']}.zip")
                 try:
                     _stale = (not os.path.exists(_zip_path) or
                               os.path.getmtime(_zip_path) < max(

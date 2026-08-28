@@ -1,5 +1,6 @@
 users_db.json
 studio_users.json
+studio_sessions.json
 studio_config.json
 
 # secrets — never commit these
