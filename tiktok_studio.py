@@ -1016,7 +1016,22 @@ with tab2:
     st.markdown("Generate up to **5 variants** of your videos (120fps • 4000kbps • 1080×1920)")
 
     # ---- Constants ----
-    VG_ROOT = os.path.expanduser("~/.tiktok_studio_variants")
+    def _vg_root():
+        """Home first, temp dir if the host won't let us write there."""
+        for base in (os.path.expanduser("~"), tempfile.gettempdir()):
+            try:
+                d = os.path.join(base, ".tiktok_studio_variants")
+                os.makedirs(d, exist_ok=True)
+                probe = os.path.join(d, ".w")
+                with open(probe, "w") as fh:
+                    fh.write("x")
+                os.unlink(probe)
+                return d
+            except Exception:
+                continue
+        return tempfile.gettempdir()
+
+    VG_ROOT = _vg_root()
     VG_BORDER_COLORS = {
         "Yellow":  "#FFDD57",
         "Orange":  "#FF8A3D",
@@ -1571,53 +1586,89 @@ with tab2:
 | 5 | + Colour border (yellow/blue/orange/green/…) or a custom overlay PNG |
         """)
 
-    # ---- Results — persisted, so a download click can't wipe them ----------
-    _vg = st.session_state.get("vg_results")
-    if _vg:
-        alive = [f for f in _vg["files"] if os.path.exists(f["path"])]
+    # ---- Results ----------------------------------------------------------
+    # Read straight off disk rather than trusting session_state. A long encode
+    # can outlive the websocket, and any refresh clears session_state, so the
+    # finished files must stay reachable regardless of what the session knows.
+    def vg_scan_batches():
+        out = []
+        if not os.path.isdir(VG_ROOT):
+            return out
+        for name in sorted(os.listdir(VG_ROOT), reverse=True):
+            bdir = os.path.join(VG_ROOT, name)
+            if not os.path.isdir(bdir):
+                continue
+            vids = sorted(f for f in os.listdir(bdir) if f.lower().endswith(".mp4"))
+            if vids:
+                out.append({
+                    "batch": name,
+                    "dir": bdir,
+                    "files": [{"name": v, "path": os.path.join(bdir, v)} for v in vids],
+                    "when": datetime.datetime.fromtimestamp(
+                        os.path.getmtime(bdir)).strftime("%Y-%m-%d %H:%M"),
+                })
+        return out
+
+    _batches = vg_scan_batches()
+    if _batches:
         st.markdown("---")
+        _latest = _batches[0]
         st.markdown(
             '<div id="vg-done" style="background:var(--ts-indigo-soft);'
             'border:1px solid #DFE3F7;border-radius:12px;padding:16px 20px;margin:6px 0 14px;">'
             f'<div style="font-size:1.05rem;font-weight:600;color:var(--ts-text);">'
-            f'✅ {len(alive)} variant(s) ready</div>'
+            f'✅ {len(_latest["files"])} variant(s) ready</div>'
             f'<div style="color:var(--ts-muted);font-size:.85rem;margin-top:3px;">'
-            f'Batch {_vg["batch"]} · generated {_vg["when"]} · your download button is right below.'
-            f'</div></div>',
+            f'Batch {_latest["batch"]} · {_latest["when"]} · download below. These stay '
+            f'here even if the page reloads.</div></div>',
             unsafe_allow_html=True,
         )
 
-        if not alive:
-            st.warning("Those files are no longer on disk. Generate them again.")
-        else:
-            _zip_path = os.path.join(_vg["dir"], f"TikTok_Variants_{_vg['batch']}.zip")
-            if not os.path.exists(_zip_path):
-                with zipfile.ZipFile(_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for fi in alive:
-                        zf.write(fi["path"], fi["name"])
-            with open(_zip_path, "rb") as fh:
-                st.download_button(
-                    f"⬇️ Download all {len(alive)} variants as ZIP",
-                    data=fh.read(),
-                    file_name=os.path.basename(_zip_path),
-                    mime="application/zip",
-                    type="primary",
-                    use_container_width=True,
-                    key="vg_dl_zip",
-                )
-            if st.button("🗑️ Clear these results", key="vg_clear"):
-                shutil.rmtree(_vg["dir"], ignore_errors=True)
-                st.session_state.vg_results = None
-                st.rerun()
+        for _bi, _b in enumerate(_batches[:5]):
+            _is_latest = _bi == 0
+            _hdr = f"📦 {_b['batch']} — {len(_b['files'])} file(s) · {_b['when']}"
+            _box = st.container() if _is_latest else st.expander(_hdr, expanded=False)
+            with _box:
+                if _is_latest:
+                    st.caption(_hdr)
+                _zip_path = os.path.join(_b["dir"], f"TikTok_Variants_{_b['batch']}.zip")
+                try:
+                    _stale = (not os.path.exists(_zip_path) or
+                              os.path.getmtime(_zip_path) < max(
+                                  os.path.getmtime(f["path"]) for f in _b["files"]))
+                    if _stale:
+                        with zipfile.ZipFile(_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for fi in _b["files"]:
+                                zf.write(fi["path"], fi["name"])
+                    _mb = os.path.getsize(_zip_path) / 1048576
+                    # hand Streamlit the open handle so a big ZIP isn't slurped into RAM
+                    st.download_button(
+                        f"⬇️ Download all {len(_b['files'])} variants as ZIP ({_mb:.0f} MB)",
+                        data=open(_zip_path, "rb"),
+                        file_name=os.path.basename(_zip_path),
+                        mime="application/zip",
+                        type="primary" if _is_latest else "secondary",
+                        use_container_width=True,
+                        key=f"vg_zip_{_b['batch']}",
+                    )
+                except Exception as e:
+                    st.error(f"Couldn't build the ZIP: {e}")
 
-            with st.expander("Download individual files"):
-                for _i, fi in enumerate(alive):
-                    _c1, _c2 = st.columns([3, 1])
-                    _c1.markdown(f"**{fi['name']}** — {os.path.getsize(fi['path'])/1048576:.1f} MB")
-                    with open(fi["path"], "rb") as fh:
-                        _c2.download_button("⬇️", data=fh.read(), file_name=fi["name"],
-                                            mime="video/mp4", key=f"vg_dl_{_i}",
-                                            use_container_width=True)
+                with st.expander(f"Download individual files ({len(_b['files'])})"):
+                    for _i, fi in enumerate(_b["files"]):
+                        _c1, _c2 = st.columns([3, 1])
+                        _c1.markdown(
+                            f"**{fi['name']}** — {os.path.getsize(fi['path'])/1048576:.1f} MB")
+                        _c2.download_button(
+                            "⬇️", data=open(fi["path"], "rb"), file_name=fi["name"],
+                            mime="video/mp4", key=f"vg_one_{_b['batch']}_{_i}",
+                            use_container_width=True,
+                        )
+
+                if st.button("🗑️ Delete this batch", key=f"vg_del_{_b['batch']}"):
+                    shutil.rmtree(_b["dir"], ignore_errors=True)
+                    st.session_state.pop("vg_results", None)
+                    st.rerun()
 
 
 # ============================================================
