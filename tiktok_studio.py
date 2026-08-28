@@ -60,6 +60,8 @@ st.markdown("""
   --ts-r:10px;
 }
 
+/* Streamlit lists pages/ in the sidebar; /admin stays unadvertised */
+[data-testid="stSidebarNav"]{display:none;}
 .stApp{background:var(--ts-bg);}
 html,body,.stApp,[class*="css"]{font-family:var(--ts-font)!important;color:var(--ts-text);}
 [data-testid="stHeader"]{background:transparent;}
@@ -193,105 +195,125 @@ def render_hero(title, tagline, tool_count):
         unsafe_allow_html=True,
     )
 
-# ── Configuration & admin ───────────────────────────────────────────────
-# Everything the admin can change lives in one JSON file. It holds API keys,
-# so it is gitignored and must never be committed.
-CONFIG_FILE = "studio_config.json"
+# ── Accounts, sign-in and per-account tool access ───────────────────────
+import studio_auth as auth
 
-TOOL_REGISTRY = [
-    ("downloader",   "📥 TikTok Downloader"),
-    ("variants",     "🎛️ Variant Generator"),
-    ("metadata",     "🔄 Refresh Metadata"),
-    ("find_similar", "🔍 Find Similar"),
-    ("audio",        "🎵 Extract Audio"),
-    ("text",         "📝 Extract Text"),
-    ("design",       "🎨 Design Studio"),
-    ("voice",        "🗣️ Saudi Voice"),
-]
+CFG = auth.load_db()
+PARAMS = {                       # tunables the tools read
+    "tts_model": "canopylabs/orpheus-arabic-saudi",
+    "tts_default_voice": "fahad",
+    "tts_chunk_chars": 550,
+    "tts_gap_ms": 140,
+    "meta_days_back": 10,
+    "design_preset": "Strong (recommended)",
+}
+TOOL_REGISTRY = auth.TOOL_REGISTRY
 
-def _sha(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-def default_config():
-    return {
-        "admin": {"username": "BAHIM", "password_hash": _sha("BAHIM")},
-        "api":   {"groq_api_key": "", "serpapi_key": ""},
-        "params": {
-            "tts_model":         "canopylabs/orpheus-arabic-saudi",
-            "tts_default_voice": "fahad",
-            "tts_chunk_chars":   550,
-            "tts_gap_ms":        140,
-            "meta_days_back":    10,
-            "design_preset":     "Strong (recommended)",
-            "app_title":         "TikTok Studio",
-            "app_tagline":       "Download · Remix · Localize · Design · Voice — your whole content pipeline in one place",
-        },
-        "tools": {k: True for k, _ in TOOL_REGISTRY},
-    }
-
-def load_config():
-    cfg = default_config()
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as fh:
-            saved = json.load(fh)
-        for section, values in saved.items():
-            if isinstance(values, dict) and isinstance(cfg.get(section), dict):
-                cfg[section].update(values)
-            else:
-                cfg[section] = values
-    except Exception:
-        pass                      # first run, or an unreadable file -> defaults
-    for k, _ in TOOL_REGISTRY:    # a tool added in a later version defaults to on
-        cfg["tools"].setdefault(k, True)
-    return cfg
-
-def save_config(cfg):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=2, ensure_ascii=False)
-    try:
-        os.chmod(CONFIG_FILE, 0o600)     # it holds API keys
-    except Exception:
-        pass
-
-CFG = load_config()
-PARAMS = CFG["params"]
 
 def cfg_api_key(name, *env_names):
-    """Admin dashboard value wins, then st.secrets, then the environment."""
-    v = CFG["api"].get(name, "")
-    if v:
-        return v, "admin dashboard"
-    for src in env_names:
-        try:
-            v = st.secrets.get(src, "")
-            if v:
-                return v, "secrets"
-        except Exception:
-            pass
-        v = os.environ.get(src, "")
-        if v:
-            return v, "environment"
-    return "", "none"
+    return auth.api_key(CFG, name, *env_names)
 
-render_hero(PARAMS.get("app_title", "TikTok Studio"),
-            PARAMS.get("app_tagline", ""),
-            sum(1 for k, _ in TOOL_REGISTRY if CFG["tools"].get(k, True)))
 
-# Tabs are built from the tools the admin left enabled. Anything disabled is
-# routed into a trailing sink tab whose button is hidden, so the existing
+# A token in the URL keeps you signed in across refreshes; the password is
+# never in the URL, only an opaque server-side session id.
+if not st.session_state.get("user_email"):
+    _tok = st.query_params.get("t")
+    _who = auth.resolve_token(_tok) if _tok else None
+    if _who and _who in CFG["users"]:
+        st.session_state.user_email = _who
+
+def _sign_out():
+    auth.revoke_token(st.query_params.get("t"))
+    st.session_state.pop("user_email", None)
+    st.query_params.clear()
+    st.rerun()
+
+
+def _render_login():
+    render_hero("TikTok Studio", "Sign in to reach your tools", len(auth.TOOL_KEYS))
+    _left, _right = st.columns([1, 1])
+
+    with _left:
+        st.subheader("Sign in")
+        _e = st.text_input("Email", key="li_email")
+        _p = st.text_input("Password", type="password", key="li_pw")
+        if st.button("Sign in", type="primary", key="li_go", use_container_width=True):
+            ok, rec, msg = auth.authenticate(CFG, _e, _p)
+            if ok:
+                auth.save_db(CFG)                       # record the sign-in time
+                st.session_state.user_email = auth.normalise_email(_e)
+                st.query_params["t"] = auth.issue_token(st.session_state.user_email)
+                st.rerun()
+            else:
+                st.error(msg)
+
+    with _right:
+        if CFG["settings"].get("allow_signup", True):
+            st.subheader("Create an account")
+            _n = st.text_input("Your name", key="su_name")
+            _se = st.text_input("Email", key="su_email")
+            _sp = st.text_input("Password", type="password", key="su_pw",
+                                help="At least 6 characters.")
+            if st.button("Create account", key="su_go", use_container_width=True):
+                ok, msg = auth.create_user(CFG, _se, _n, _sp, permissions=[])
+                if ok:
+                    auth.save_db(CFG)
+                    st.success(msg + " You can sign in on the left.")
+                    st.info(CFG["settings"].get("signup_message", ""))
+                else:
+                    st.error(msg)
+        else:
+            st.subheader("Accounts")
+            st.info("Sign-ups are closed. Ask the administrator to create an "
+                    "account for you.")
+    st.stop()
+
+
+if not st.session_state.get("user_email"):
+    _render_login()
+
+USER_EMAIL = st.session_state.user_email
+USER = CFG["users"].get(USER_EMAIL)
+if not USER or not USER.get("active", True):
+    st.session_state.pop("user_email", None)
+    st.query_params.clear()
+    st.rerun()
+
+MY_TOOLS = auth.allowed_tools(CFG, USER_EMAIL)
+
+render_hero("TikTok Studio",
+            f"Signed in as <b>{USER.get('name', USER_EMAIL)}</b> — "
+            f"{len(MY_TOOLS)} tool(s) available to you",
+            len(MY_TOOLS))
+
+with st.sidebar:
+    st.markdown(f"**{USER.get('name', USER_EMAIL)}**")
+    st.caption(USER_EMAIL)
+    if st.button("Sign out", use_container_width=True, key="sb_out"):
+        _sign_out()
+
+# An account with nothing granted gets a holding screen, by design.
+if not MY_TOOLS:
+    st.info("### ⏳ No tools yet\n\n"
+            + CFG["settings"].get("signup_message", "")
+            + "\n\nOnce access is granted, your tools appear here automatically — "
+              "just refresh the page.")
+    if st.button("🔄 Check again", type="primary", key="recheck"):
+        st.rerun()
+    st.stop()
+
+# Tabs are built from the tools THIS account is allowed to see. Anything else
+# is routed into a trailing sink tab whose button is hidden, so the existing
 # `with tabN:` blocks keep working untouched.
-_enabled  = [(k, lbl) for k, lbl in TOOL_REGISTRY if CFG["tools"].get(k, True)]
+_enabled  = [(k, lbl) for k, lbl in TOOL_REGISTRY if k in MY_TOOLS]
 _disabled = len(_enabled) < len(TOOL_REGISTRY)
-_labels   = [lbl for _, lbl in _enabled] + ["⚙️ Admin"] + (["·"] if _disabled else [])
+_labels   = [lbl for _, lbl in _enabled] + (["·"] if _disabled else [])
 _tab_objs = st.tabs(_labels)
 
-_slot     = {k: _tab_objs[i] for i, (k, _) in enumerate(_enabled)}
-admin_tab = _tab_objs[len(_enabled)]
-_sink     = _tab_objs[-1] if _disabled else admin_tab
+_slot = {k: _tab_objs[i] for i, (k, _) in enumerate(_enabled)}
+_sink = _tab_objs[-1] if _disabled else _tab_objs[0]
 
 if _disabled:
-    # the sink is the last tab; the highlight bar is a DIV, so :last-of-type
-    # among the buttons always lands on it
     st.markdown(
         '<style>.stTabs [data-baseweb="tab-list"] '
         'button[data-baseweb="tab"]:last-of-type{display:none!important;}</style>',
@@ -3330,185 +3352,5 @@ with tab8:
             st.info("Write or paste your script above, pick a voice, then hit **Generate Voice**.")
 
 
-# ============================================================
-# ADMIN — login-gated settings dashboard
-# ============================================================
-with admin_tab:
-    if not st.session_state.get("is_admin"):
-        st.header("⚙️ Admin")
-        st.markdown("Sign in to manage API keys, tool visibility and defaults.")
-        _l1, _l2 = st.columns([1, 1])
-        with _l1:
-            _u = st.text_input("Username", key="adm_user")
-            _p = st.text_input("Password", type="password", key="adm_pass")
-            if st.button("🔓 Sign in", type="primary", key="adm_login"):
-                if _u.strip() == CFG["admin"]["username"] and _sha(_p) == CFG["admin"]["password_hash"]:
-                    st.session_state.is_admin = True
-                    st.rerun()
-                else:
-                    st.error("Wrong username or password.")
-        with _l2:
-            st.info(
-                "This gate only hides the settings panel — it is not real "
-                "security. Anyone who can open the app can still use the tools, "
-                "and anyone with access to the server can read the key file. "
-                "Don't treat it as protection for a public deployment."
-            )
-    else:
-        _h1, _h2 = st.columns([4, 1])
-        with _h1:
-            st.header("⚙️ Admin Dashboard")
-            st.caption(f"Signed in as **{CFG['admin']['username']}**")
-        with _h2:
-            if st.button("Sign out", key="adm_logout", use_container_width=True):
-                st.session_state.is_admin = False
-                st.rerun()
-
-        # ── API keys ────────────────────────────────────────
-        st.subheader("🔑 API Keys")
-        st.caption(
-            f"Saved to `{CONFIG_FILE}` on this machine. That file is gitignored — "
-            "it is never committed. On Streamlit Cloud the filesystem resets on "
-            "redeploy, so there use **Settings → Secrets** instead."
-        )
-        _k1, _k2 = st.columns(2)
-        with _k1:
-            _groq = st.text_input(
-                "Groq API key — powers 🗣️ Saudi Voice", type="password",
-                value=CFG["api"].get("groq_api_key", ""),
-                placeholder="gsk_…", key="adm_groq",
-            )
-        with _k2:
-            _serp = st.text_input(
-                "SerpAPI key — powers 🔍 Find Similar", type="password",
-                value=CFG["api"].get("serpapi_key", ""),
-                placeholder="Your SerpAPI key", key="adm_serp",
-            )
-        _live_groq, _src_groq = cfg_api_key("groq_api_key", "GROQ_API_KEY")
-        _live_serp, _src_serp = cfg_api_key("serpapi_key", "SERPAPI_KEY")
-        st.caption(
-            f"Groq: {'✅ active via ' + _src_groq if _live_groq else '❌ not set'} · "
-            f"SerpAPI: {'✅ active via ' + _src_serp if _live_serp else '❌ not set'}"
-        )
-        if st.button("💾 Save API keys", type="primary", key="adm_save_keys"):
-            CFG["api"]["groq_api_key"] = _groq.strip()
-            CFG["api"]["serpapi_key"] = _serp.strip()
-            save_config(CFG)
-            st.success("Saved.")
-            st.rerun()
-
-        # ── Visible tools ───────────────────────────────────
-        st.subheader("🧩 Tools Shown in the App")
-        st.caption("Untick a tool to hide its tab from everyone.")
-        _tcols = st.columns(4)
-        _new_tools = {}
-        for _i, (_key, _label) in enumerate(TOOL_REGISTRY):
-            with _tcols[_i % 4]:
-                _new_tools[_key] = st.checkbox(
-                    _label, value=CFG["tools"].get(_key, True), key=f"adm_tool_{_key}"
-                )
-        if not any(_new_tools.values()):
-            st.warning("At least one tool has to stay visible.")
-        if st.button("💾 Save visible tools", type="primary", key="adm_save_tools",
-                     disabled=not any(_new_tools.values())):
-            CFG["tools"] = _new_tools
-            save_config(CFG)
-            st.success("Saved.")
-            st.rerun()
-
-        # ── Defaults ────────────────────────────────────────
-        st.subheader("🎚️ Default Parameters")
-        _p1, _p2 = st.columns(2)
-        with _p1:
-            st.markdown("**🗣️ Saudi Voice**")
-            _m_model = st.text_input("Groq TTS model", value=PARAMS.get("tts_model", ""),
-                                     key="adm_model")
-            _m_voice = st.selectbox(
-                "Default voice",
-                ["fahad", "sultan", "abdullah", "noura", "lulwa", "aisha"],
-                index=["fahad", "sultan", "abdullah", "noura", "lulwa", "aisha"].index(
-                    PARAMS.get("tts_default_voice", "fahad")
-                ) if PARAMS.get("tts_default_voice", "fahad") in
-                     ["fahad", "sultan", "abdullah", "noura", "lulwa", "aisha"] else 0,
-                key="adm_voice",
-            )
-            _m_chunk = st.slider("Characters per request", 200, 900,
-                                 int(PARAMS.get("tts_chunk_chars", 550)), 50, key="adm_chunk",
-                                 help="Bigger chunks = fewer requests against Groq's quota, "
-                                      "but a higher chance of hitting the per-minute token limit.")
-            _m_gap = st.slider("Default pause between sentences (ms)", 0, 600,
-                               int(PARAMS.get("tts_gap_ms", 140)), 20, key="adm_gap")
-        with _p2:
-            st.markdown("**🔄 Refresh Metadata**")
-            _m_days = st.slider("Back-date timestamps up to (days)", 1, 60,
-                                int(PARAMS.get("meta_days_back", 10)), 1, key="adm_days")
-            st.markdown("**🎨 Design Studio**")
-            _m_preset = st.select_slider(
-                "Default cleanup strength",
-                options=["Gentle", "Balanced", "Strong (recommended)", "Maximum"],
-                value=PARAMS.get("design_preset", "Strong (recommended)"), key="adm_preset",
-            )
-            st.markdown("**🏷️ Branding**")
-            _m_title = st.text_input("App title", value=PARAMS.get("app_title", "TikTok Studio"),
-                                     key="adm_title")
-            _m_tag = st.text_area("Tagline", value=PARAMS.get("app_tagline", ""), height=80,
-                                  key="adm_tagline")
-
-        if st.button("💾 Save parameters", type="primary", key="adm_save_params"):
-            CFG["params"].update({
-                "tts_model": _m_model.strip() or "canopylabs/orpheus-arabic-saudi",
-                "tts_default_voice": _m_voice,
-                "tts_chunk_chars": int(_m_chunk),
-                "tts_gap_ms": int(_m_gap),
-                "meta_days_back": int(_m_days),
-                "design_preset": _m_preset,
-                "app_title": _m_title.strip() or "TikTok Studio",
-                "app_tagline": _m_tag.strip(),
-            })
-            save_config(CFG)
-            st.success("Saved.")
-            st.rerun()
-
-        # ── Account ─────────────────────────────────────────
-        st.subheader("👤 Admin Account")
-        _a1, _a2, _a3 = st.columns(3)
-        with _a1:
-            _n_user = st.text_input("Username", value=CFG["admin"]["username"], key="adm_newuser")
-        with _a2:
-            _n_pw = st.text_input("New password", type="password", key="adm_newpw")
-        with _a3:
-            _n_pw2 = st.text_input("Confirm password", type="password", key="adm_newpw2")
-        if st.button("💾 Update credentials", key="adm_save_cred"):
-            if not _n_user.strip():
-                st.error("The username can't be empty.")
-            elif _n_pw and _n_pw != _n_pw2:
-                st.error("The two passwords don't match.")
-            else:
-                CFG["admin"]["username"] = _n_user.strip()
-                if _n_pw:
-                    CFG["admin"]["password_hash"] = _sha(_n_pw)
-                save_config(CFG)
-                st.success("Updated." + ("" if _n_pw else " (password unchanged)"))
-                st.rerun()
-
-        # ── Config file ─────────────────────────────────────
-        st.subheader("💾 Configuration File")
-        _safe = json.loads(json.dumps(CFG))
-        _safe["api"] = {k: ("•" * 8 + v[-4:] if v else "") for k, v in _safe["api"].items()}
-        _safe["admin"]["password_hash"] = "•" * 16
-        with st.expander("Show current configuration (keys masked)"):
-            st.json(_safe)
-        st.download_button(
-            "⬇️ Download backup (includes real keys — keep it private)",
-            data=json.dumps(CFG, indent=2, ensure_ascii=False).encode("utf-8"),
-            file_name="studio_config_backup.json", mime="application/json",
-            key="adm_backup", use_container_width=True,
-        )
-        _restore = st.file_uploader("Restore from a backup", type=["json"], key="adm_restore")
-        if _restore and st.button("♻️ Restore this file", key="adm_do_restore"):
-            try:
-                save_config(json.loads(_restore.getvalue().decode("utf-8")))
-                st.success("Restored.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Couldn't read that file: {e}")
+# The admin panel now lives at /admin (see pages/admin.py) so it has its
+# own URL and is not reachable from a signed-in user's tab bar.

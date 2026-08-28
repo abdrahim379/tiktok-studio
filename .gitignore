@@ -1,8 +1,9 @@
 users_db.json
+studio_users.json
+studio_config.json
 
 # secrets — never commit these
 .streamlit/secrets.toml
-studio_config.json
 *.env
 
 __pycache__/
