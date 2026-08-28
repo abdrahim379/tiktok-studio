@@ -1251,35 +1251,56 @@ with tab2:
 
     overlay_img = None
     border_hex = None
-    border_thick = 28
-    border_margin = 18
+    border_thick = 9
+    border_margin = 8
 
     if v5_mode == "Colour border":
-        _b1, _b2, _b3 = st.columns([2, 1, 1])
-        with _b1:
+        # Sizes are a fraction of the 1080px frame width, so the frame reads the
+        # same at any resolution. "Thin" matches the reference border: a hairline
+        # sitting tight to the edge, not a chunky band.
+        VG_BORDER_SIZES = {
+            "Hairline":            (0.0046, 0.0055),
+            "Thin (recommended)":  (0.0085, 0.0074),
+            "Medium":              (0.0150, 0.0110),
+            "Bold":                (0.0260, 0.0165),
+        }
+        _s1, _s2 = st.columns([1, 1])
+        with _s1:
             _names = list(VG_BORDER_COLORS.keys()) + ["Custom…"]
             _pick = st.selectbox("Colour", _names, index=0, key="vg_bcolor")
             border_hex = (st.color_picker("Pick a colour", "#FFDD57", key="vg_bcustom")
                           if _pick == "Custom…" else VG_BORDER_COLORS[_pick])
-        with _b2:
-            border_thick = st.slider("Thickness (px)", 4, 140, 28, 2, key="vg_bthick")
-        with _b3:
-            border_margin = st.slider("Margin from edge (px)", 0, 140, 18, 2, key="vg_bmargin")
+        with _s2:
+            _size = st.select_slider(
+                "Border size", options=list(VG_BORDER_SIZES.keys()) + ["Custom"],
+                value="Thin (recommended)", key="vg_bsize",
+            )
 
-        # live preview at 1080×1920 scaled down
-        _pw, _ph = 108, 192
-        _sm = border_margin * _pw / TARGET_W
-        _st_ = max(1.0, border_thick * _pw / TARGET_W)
+        if _size == "Custom":
+            _c1, _c2 = st.columns(2)
+            border_thick = _c1.slider("Thickness (px)", 2, 90, 9, 1, key="vg_bthick")
+            border_margin = _c2.slider("Inset from edge (px)", 0, 90, 8, 1, key="vg_bmargin")
+        else:
+            _tp, _mp = VG_BORDER_SIZES[_size]
+            border_thick = max(2, round(TARGET_W * _tp))
+            border_margin = max(0, round(TARGET_W * _mp))
+
+        # true-to-scale preview: same ratios as the real 1080x1920 output
+        _pw, _ph = 104, 185
+        _k = _pw / TARGET_W
+        _sm, _st_ = border_margin * _k, max(0.7, border_thick * _k)
         st.markdown(
-            f'<div style="display:flex;align-items:center;gap:14px;margin-top:6px;">'
-            f'  <div style="width:{_pw}px;height:{_ph}px;background:#2A2E3A;border-radius:6px;'
-            f'       position:relative;flex:0 0 auto;">'
+            f'<div style="display:flex;align-items:center;gap:16px;margin-top:8px;">'
+            f'  <div style="width:{_pw}px;height:{_ph}px;background:#8C98A4;border-radius:5px;'
+            f'       position:relative;flex:0 0 auto;overflow:hidden;">'
             f'    <div style="position:absolute;left:{_sm}px;top:{_sm}px;'
             f'         right:{_sm}px;bottom:{_sm}px;'
-            f'         border:{_st_}px solid {border_hex};"></div>'
+            f'         border:{_st_}px solid {border_hex};box-sizing:border-box;"></div>'
             f'  </div>'
-            f'  <div style="font-size:.85rem;color:var(--ts-muted);">Preview of variant 5<br>'
-            f'    <code>{border_hex}</code> · {border_thick}px thick · {border_margin}px inset</div>'
+            f'  <div style="font-size:.85rem;color:var(--ts-muted);line-height:1.6;">'
+            f'    <b style="color:var(--ts-text)">Variant 5 preview</b> — true to scale<br>'
+            f'    <code>{border_hex}</code> · {border_thick}px thick · {border_margin}px inset'
+            f'    <br>on a 1080×1920 frame</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
