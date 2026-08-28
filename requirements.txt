@@ -6,3 +6,4 @@ numpy
 groq
 piexif
 faster-whisper
+imageio-ffmpeg

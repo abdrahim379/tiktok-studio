@@ -7,28 +7,90 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Resolve tool paths (works even when Streamlit strips PATH) ──────────
+def _imageio_ffmpeg():
+    """
+    Static ffmpeg shipped as a pip wheel. Hosts that ignore packages.txt (the
+    Streamlit Cloud image does) have no apt ffmpeg at all, so this is what
+    actually keeps the encoders working there.
+    """
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        return exe if exe and os.path.exists(exe) else None
+    except Exception:
+        return None
+
+
 def _find_bin(name):
     """Return full path of a binary, checking common locations."""
     candidates = [
-        f"/opt/homebrew/bin/{name}",      # macOS Apple Silicon
+        f"/opt/homebrew/bin/{name}",       # macOS Apple Silicon
         f"/usr/local/bin/{name}",          # macOS Intel / Linux
         f"/usr/bin/{name}",
-        name,                              # fallback: rely on PATH
+        shutil.which(name),                # whatever PATH says
+        name,                              # last resort
     ]
+    if name == "ffmpeg":
+        candidates.insert(0, _imageio_ffmpeg())
     # ffmpeg/ffprobe use -version (single dash), yt-dlp uses --version
     version_flag = "-version" if name in ("ffmpeg", "ffprobe") else "--version"
     for p in candidates:
+        if not p:
+            continue
         try:
-            r = subprocess.run([p, version_flag], capture_output=True, timeout=5)
+            r = subprocess.run([p, version_flag], capture_output=True, timeout=10)
             if r.returncode == 0:
                 return p
         except Exception:
             continue
     return name  # last resort
 
+
 YTDLP   = _find_bin("yt-dlp")
 FFMPEG  = _find_bin("ffmpeg")
 FFPROBE = _find_bin("ffprobe")
+
+# ffprobe has no pip wheel, so it can genuinely be missing while ffmpeg works.
+# Everything it was used for (duration, size, fps) is also printed by
+# `ffmpeg -i`, so fall back to parsing that instead of failing the job.
+def _have(binary):
+    try:
+        return subprocess.run([binary, "-version"], capture_output=True,
+                              timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+HAVE_FFPROBE = _have(FFPROBE)
+HAVE_FFMPEG  = _have(FFMPEG)
+
+_FF_DUR_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_FF_VID_RE = re.compile(r"Stream.*Video:.*?(\d{2,5})x(\d{2,5})")
+_FF_FPS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:fps|tbr)")
+
+
+def ffmpeg_probe(path):
+    """(width, height, fps, duration_seconds) parsed from `ffmpeg -i` stderr."""
+    try:
+        r = subprocess.run([FFMPEG, "-hide_banner", "-i", path],
+                           capture_output=True, text=True, timeout=60)
+        txt = (r.stderr or "") + (r.stdout or "")
+    except Exception:
+        return None, None, None, None
+    w = h = fps = dur = None
+    m = _FF_VID_RE.search(txt)
+    if m:
+        w, h = int(m.group(1)), int(m.group(2))
+    m = _FF_FPS_RE.search(txt)
+    if m:
+        try:
+            fps = float(m.group(1))
+        except ValueError:
+            fps = None
+    m = _FF_DUR_RE.search(txt)
+    if m:
+        dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    return w, h, fps, dur
 
 st.set_page_config(
     page_title="TikTok Studio",
@@ -986,21 +1048,23 @@ with tab2:
             return None
 
     def ffprobe_json(path, select="format"):
+        if not HAVE_FFPROBE:
+            return {}
         try:
             p = vg_run([FFPROBE, "-v", "error", "-show_entries", select, "-of", "json", path])
             return json.loads(p.stdout) if p else {}
-        except Exception as e:
-            st.error(f"ffprobe_json error: {e}")
+        except Exception:
             return {}
 
     def ffprobe_streams(path):
+        if not HAVE_FFPROBE:
+            return {}
         try:
             p = vg_run([FFPROBE, "-v", "error", "-select_streams", "v:0",
                         "-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate",
                         "-of", "json", path])
             return json.loads(p.stdout).get("streams", [{}])[0] if p else {}
-        except Exception as e:
-            st.error(f"ffprobe_streams error: {e}")
+        except Exception:
             return {}
 
     def parse_fps(rate_str):
@@ -1013,22 +1077,23 @@ with tab2:
             return None
 
     def get_video_meta(path):
-        try:
-            s = ffprobe_streams(path)
+        s = ffprobe_streams(path)
+        if s:
             return s.get("width"), s.get("height"), parse_fps(
                 s.get("avg_frame_rate") or s.get("r_frame_rate")
             )
-        except Exception as e:
-            st.error(f"get_video_meta error: {e}")
-            return None, None, None
+        w, h, fps, _ = ffmpeg_probe(path)      # no ffprobe on this host
+        return w, h, fps
 
     def get_duration_seconds(path):
-        try:
-            data = ffprobe_json(path, select="format")
-            dur = data.get("format", {}).get("duration")
-            return float(dur) if dur else None
-        except Exception:
-            return None
+        data = ffprobe_json(path, select="format")
+        dur = data.get("format", {}).get("duration") if data else None
+        if dur:
+            try:
+                return float(dur)
+            except (TypeError, ValueError):
+                pass
+        return ffmpeg_probe(path)[3]
 
     def parse_progress(line):
         try:
