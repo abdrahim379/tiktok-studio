@@ -411,6 +411,20 @@ with tab_sys:
             st.success("Updated." + ("" if ap else " (password unchanged)"))
             st.rerun()
 
+    st.markdown("### Staying signed in")
+    if auth.secret_is_persistent():
+        st.success("✅ `AUTH_SECRET` is configured — sign-ins survive restarts and redeploys.")
+    else:
+        st.warning(
+            "⚠️ No `AUTH_SECRET` set, so the signing key is regenerated whenever the "
+            "app restarts — everyone gets signed out. Fix it by adding a line like "
+            "this under **Settings → Secrets** on Streamlit Cloud (any long random "
+            "string works):"
+        )
+        st.code(f'AUTH_SECRET = "{__import__("secrets").token_urlsafe(32)}"', language="toml")
+        st.caption("Locally you can export it instead: "
+                   "`export AUTH_SECRET=\"...\"` before running the app.")
+
     st.markdown("### Backup & restore")
     st.download_button(
         "⬇️ Download backup (contains hashes and keys — keep it private)",

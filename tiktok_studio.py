@@ -311,7 +311,7 @@ if not st.session_state.get("user_email"):
     # the cookie is the durable one; ?t= still works for a shared link
     _tok = _cookie_token() or st.query_params.get("t") or ""
     _who = auth.resolve_token(_tok) if _tok else None
-    if _who and _who in CFG["users"] and CFG["users"][_who].get("active", True):
+    if _who and _who in CFG["users"] and auth.token_still_good(CFG, _who, _tok):
         st.session_state.user_email = _who
         st.session_state.auth_token = _tok
         _remember_token(_tok)          # refresh the expiry on every visit
@@ -518,12 +518,21 @@ with tab1:
             return vid_id, existing, None
 
         if start_delay:
-            time.sleep(start_delay)
+            time.sleep(start_delay)   # only used when TikTok has been rate-limiting
 
         os.makedirs(vid_dir, exist_ok=True)
         output_template = os.path.join(vid_dir, f"{vid_id}.%(ext)s")
 
-        FORMAT_ATTEMPTS = ["bestvideo+bestaudio/best", "best", "worst"]
+        # Speed notes:
+        #  * a single progressive MP4 is tried FIRST. bestvideo+bestaudio forces
+        #    a separate audio download plus an ffmpeg remux, and TikTok serves a
+        #    perfectly good combined file, so that work was pure overhead.
+        #  * --concurrent-fragments pulls fragmented streams in parallel, which
+        #    is where most of the wall time went on a fast connection.
+        #  * --sleep-requests 1 was throttling every request by a second on
+        #    purpose; dropped, with the retry backoff left in place to stay
+        #    polite when TikTok actually pushes back.
+        FORMAT_ATTEMPTS = ["best[ext=mp4]/best", "bestvideo+bestaudio/best", "worst"]
         last_err = ""
 
         for fmt in FORMAT_ATTEMPTS:
@@ -531,14 +540,19 @@ with tab1:
                 YTDLP, "-f", fmt,
                 "--merge-output-format", "mp4",
                 "--no-warnings", "--no-check-certificate",
-                "--extractor-retries", "5",
-                "--retries", "10",
-                "--fragment-retries", "10",
-                "--retry-sleep", "3",
-                "--sleep-requests", "1",
+                "--concurrent-fragments", "8",
+                "--http-chunk-size", "10M",
+                "--socket-timeout", "20",
+                "--no-playlist",
+                "--extractor-retries", "3",
+                "--retries", "8",
+                "--fragment-retries", "8",
+                "--retry-sleep", "2",
                 "-o", output_template,
                 vid_url,
             ]
+            if FFMPEG and FFMPEG != "ffmpeg":
+                cmd[1:1] = ["--ffmpeg-location", FFMPEG]
             try:
                 result = subprocess.run(cmd, capture_output=True, timeout=240)
             except subprocess.TimeoutExpired:
@@ -555,6 +569,30 @@ with tab1:
                 last_err = result.stderr.decode(errors="replace")[-300:] if result.stderr else "unknown error"
 
             time.sleep(1.5)
+
+        # TikTok intermittently answers extraction with a challenge error when
+        # several workers arrive at once. One spaced-out retry clears it; this
+        # is why the request throttle was only loosened, not removed.
+        if "rehydration" in last_err or "Unable to extract" in last_err or "challenge" in last_err.lower():
+            time.sleep(random.uniform(4, 9))
+            cmd = [
+                YTDLP, "-f", "best[ext=mp4]/best",
+                "--merge-output-format", "mp4",
+                "--no-warnings", "--no-check-certificate",
+                "--concurrent-fragments", "8",
+                "--socket-timeout", "20",
+                "--sleep-requests", "1",       # back on for the retry
+                "--extractor-retries", "5",
+                "--retries", "10",
+                "-o", output_template, vid_url,
+            ]
+            try:
+                if subprocess.run(cmd, capture_output=True, timeout=300).returncode == 0:
+                    fpath = _find_completed_file(vid_dir, vid_id)
+                    if fpath:
+                        return vid_id, fpath, None
+            except Exception:
+                pass
 
         return vid_id, None, last_err
 
@@ -905,7 +943,7 @@ with tab1:
             _f1, _f2 = st.columns([3, 1])
             with _f2:
                 max_workers = st.slider(
-                    "⚡ Parallel downloads", 1, 10, 5,
+                    "⚡ Parallel downloads", 1, 16, 8,
                     help="How many videos to download at the same time. 5 is a safe default — go "
                          "higher only if your connection is very fast and TikTok isn't rate-limiting you.",
                 )
@@ -2675,24 +2713,79 @@ with tab6:
             key="et_files",
         )
 
+        # Whisper leans heavily towards Modern Standard Arabic, so Saudi dialect
+        # comes back "corrected" into فصحى or simply misheard. An initial_prompt
+        # written IN the dialect biases the decoder towards the right vocabulary
+        # and spelling — it is the single biggest accuracy lever here, ahead of
+        # everything except model size.
+        ET_SAUDI_PROMPT = (
+            "هذا مقطع باللهجة السعودية العامية. "
+            "وش رايك؟ إيش تبغى؟ أبغى أشوف الحين. كذا زين مره. "
+            "ترا الشغلة سهلة، عشان كذا لازم تجرب. وشلون الحال؟ ليش كذا؟ "
+            "يعطيك العافية، الله يحييك، خلاص تمام. بكرة إن شاء الله. "
+            "المنتج هذا مره حلو وسعره رخيص، توصيل سريع لجميع مناطق المملكة. "
+            "اطلب الحين والدفع عند الاستلام."
+        )
+        ET_MSA_PROMPT = (
+            "هذا تسجيل باللغة العربية الفصحى. "
+            "أهلاً وسهلاً بكم، سنتحدث اليوم عن هذا المنتج ومواصفاته وسعره."
+        )
+
         st.subheader("Step 2 — Options")
         et_col1, et_col2 = st.columns(2)
         with et_col1:
             et_lang_choice = st.selectbox(
-                "Language",
-                ["Auto-detect", "Arabic (العربية)", "English"],
-                help="Pick the spoken language for best accuracy, or let it auto-detect.",
+                "Language / dialect",
+                ["Saudi Arabic — اللهجة السعودية",
+                 "Arabic — Modern Standard الفصحى",
+                 "English",
+                 "Auto-detect"],
+                index=0,
+                help="Pick Saudi and the model gets primed with dialect vocabulary "
+                     "instead of being nudged towards فصحى.",
             )
         with et_col2:
             et_model_size = st.select_slider(
                 "Accuracy vs speed",
-                options=["base", "small", "medium"],
-                value="small",
-                help="base = fastest, medium = most accurate (especially for Arabic). "
-                     "First use of a size downloads the model once (~150 MB–1.5 GB).",
+                options=["base", "small", "medium", "large-v3"],
+                value="medium",
+                help="Arabic dialect needs size. medium is the sensible floor; "
+                     "large-v3 is clearly the most accurate but downloads ~3 GB "
+                     "and is slow on CPU — good locally, too heavy for the cloud app.",
             )
+        if et_model_size in ("base", "small"):
+            st.caption("⚠️ base/small mishear Saudi dialect badly. Use **medium** or "
+                       "**large-v3** for anything you actually care about.")
 
-        ET_LANG_CODES = {"Auto-detect": None, "Arabic (العربية)": "ar", "English": "en"}
+        with st.expander("🎯 Improve accuracy further"):
+            et_vocab = st.text_area(
+                "Names the model keeps getting wrong",
+                placeholder="Brand names, product names, people, cities — comma separated.\n"
+                            "e.g. ايكوم ستوديو, جدة, الرياض, سناب شات",
+                height=70,
+                help="These get fed to the model as context, which is the most "
+                     "effective way to fix a specific word it keeps mangling.",
+            )
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                et_clean_audio = st.checkbox(
+                    "Clean up the audio first", value=True,
+                    help="Normalises loudness and trims rumble/hiss before "
+                         "transcribing. Helps a lot on phone-recorded TikTok audio.",
+                )
+            with _c2:
+                et_no_drift = st.checkbox(
+                    "Prevent repeated-text drift", value=True,
+                    help="Stops the model repeating a phrase in a loop, which "
+                         "Arabic transcription is prone to.",
+                )
+
+        ET_LANG_CODES = {
+            "Saudi Arabic — اللهجة السعودية": ("ar", ET_SAUDI_PROMPT),
+            "Arabic — Modern Standard الفصحى": ("ar", ET_MSA_PROMPT),
+            "English": ("en", None),
+            "Auto-detect": (None, None),
+        }
 
         st.subheader("Step 3 — Extract Text")
         et_go = st.button(
@@ -2723,11 +2816,13 @@ with tab6:
 
                     # Convert to 16 kHz mono WAV — what Whisper expects
                     wav_path = os.path.join(et_tmpdir, f"audio_{idx}.wav")
-                    conv = subprocess.run(
-                        [FFMPEG, "-y", "-i", in_path, "-vn",
-                         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path],
-                        capture_output=True, timeout=300,
-                    )
+                    _af = ("highpass=f=60,lowpass=f=7500,"
+                           "loudnorm=I=-16:TP=-1.5:LRA=11") if et_clean_audio else None
+                    _cmd = [FFMPEG, "-y", "-i", in_path, "-vn"]
+                    if _af:
+                        _cmd += ["-af", _af]
+                    _cmd += ["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path]
+                    conv = subprocess.run(_cmd, capture_output=True, timeout=600)
                     if conv.returncode != 0 or not os.path.exists(wav_path):
                         err = conv.stderr.decode(errors="replace")[-200:] if conv.stderr else "no audio track?"
                         st.session_state.et_results.append(
@@ -2737,10 +2832,23 @@ with tab6:
                         continue
 
                     try:
+                        _lang, _prompt = ET_LANG_CODES[et_lang_choice]
+                        if et_vocab.strip():
+                            _extra = " " + " ".join(
+                                w.strip() for w in et_vocab.split(",") if w.strip())
+                            _prompt = (_prompt or "") + _extra
                         segments, info = et_model.transcribe(
                             wav_path,
-                            language=ET_LANG_CODES[et_lang_choice],
+                            language=_lang,
+                            initial_prompt=_prompt,
+                            beam_size=5,
+                            best_of=5,
+                            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+                            condition_on_previous_text=not et_no_drift,
+                            compression_ratio_threshold=2.4,
+                            no_speech_threshold=0.6,
                             vad_filter=True,
+                            vad_parameters={"min_silence_duration_ms": 500},
                         )
                         text = "\n".join(s.text.strip() for s in segments).strip()
                         st.session_state.et_results.append({

@@ -207,87 +207,162 @@ def api_key(db, name, *env_names):
 
 
 # ── staying signed in ───────────────────────────────────────────────────
-# Two things have to hold for a session to survive "close the tab and come
-# back later":
-#   1. the token must outlive the Python process, so it is written to disk
-#      rather than kept in a module-level dict (Streamlit Cloud restarts the
-#      app whenever it sleeps, which would have logged everyone out);
-#   2. the browser has to remember it without the URL, which the app layer
-#      does by mirroring the token into localStorage.
-# The token is an opaque random id — no password or email ever goes near the
-# URL. It is a bearer credential, so anyone holding it is that user until it
-# expires or is signed out.
+# Tokens are SIGNED, not stored. An earlier version kept them in a JSON file,
+# which fails on hosts that recycle the filesystem: Streamlit Cloud hands back
+# a fresh container after the app sleeps, the file vanishes, and every token
+# stops resolving — i.e. everyone gets logged out.
+#
+# A signed token carries its own identity and expiry and is verified with an
+# HMAC, so validating it needs no disk at all. Keep AUTH_SECRET in
+# st.secrets (those survive redeploys) and sessions survive refresh, restart,
+# sleep/wake and redeploy alike.
+#
+# Trade-off, stated plainly: without a store there is no perfect revocation.
+# Revoked tokens are remembered best-effort in a small file, so if that file
+# is wiped a revoked token works again until it expires. Expiry is the real
+# backstop, which is why it is days rather than months.
+import base64
+
 SESSION_FILE = os.environ.get("STUDIO_SESSIONS_DB", "studio_sessions.json")
 SESSION_DAYS = 30
+_SECRET_CACHE = []
 
 
-def _load_sessions():
+def auth_secret():
+    """Stable signing key. st.secrets first — that is what survives redeploys."""
+    if _SECRET_CACHE:
+        return _SECRET_CACHE[0]
+    val = ""
     try:
-        with open(SESSION_FILE, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+        import streamlit as st
+        val = st.secrets.get("AUTH_SECRET", "") or ""
     except Exception:
-        return {}
+        val = ""
+    val = val or os.environ.get("AUTH_SECRET", "")
+    if not val:
+        # fall back to one persisted alongside the accounts, then to a random
+        # per-process key (which means sign-outs on restart — the admin panel
+        # flags this so it can be fixed by setting AUTH_SECRET).
+        try:
+            db = load_db()
+            val = db.get("settings", {}).get("auth_secret", "")
+            if not val:
+                val = secrets.token_urlsafe(32)
+                db.setdefault("settings", {})["auth_secret"] = val
+                save_db(db)
+        except Exception:
+            val = secrets.token_urlsafe(32)
+    _SECRET_CACHE.append(val)
+    return val
 
 
-def _save_sessions(data):
+def secret_is_persistent():
+    """True when AUTH_SECRET comes from somewhere that survives a redeploy."""
     try:
-        tmp = SESSION_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-        os.replace(tmp, SESSION_FILE)
-        os.chmod(SESSION_FILE, 0o600)
+        import streamlit as st
+        if st.secrets.get("AUTH_SECRET", ""):
+            return True
     except Exception:
-        pass                      # a read-only host just means shorter sessions
+        pass
+    return bool(os.environ.get("AUTH_SECRET", ""))
 
 
-def _prune(data):
-    cutoff = datetime.datetime.now() - datetime.timedelta(days=SESSION_DAYS)
-    dead = [t for t, v in data.items()
-            if datetime.datetime.fromisoformat(v["issued"]) < cutoff]
-    for t in dead:
-        data.pop(t, None)
-    return data
+def _b64e(raw):
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def issue_token(identity):
-    data = _prune(_load_sessions())
-    tok = secrets.token_urlsafe(24)
-    data[tok] = {"identity": identity,
-                 "issued": datetime.datetime.now().isoformat()}
-    _save_sessions(data)
-    return tok
+def _b64d(txt):
+    return base64.urlsafe_b64decode(txt + "=" * (-len(txt) % 4))
+
+
+def _sign(payload_b64):
+    return _b64e(hmac.new(auth_secret().encode(), payload_b64.encode(),
+                          hashlib.sha256).digest())
+
+
+def issue_token(identity, epoch=None):
+    """`epoch` stamps the account's revocation counter into the token so a
+    later suspension invalidates it without needing any stored session."""
+    if epoch is None:
+        try:
+            rec = load_db()["users"].get(normalise_email(identity), {})
+            epoch = rec.get("token_epoch", 0)
+        except Exception:
+            epoch = 0
+    exp = (datetime.datetime.now() +
+           datetime.timedelta(days=SESSION_DAYS)).timestamp()
+    body = _b64e(json.dumps({"i": identity, "e": int(exp), "ep": int(epoch),
+                             "n": secrets.token_hex(6)}).encode())
+    return f"{body}.{_sign(body)}"
 
 
 def resolve_token(tok):
-    if not tok:
+    if not tok or "." not in tok:
         return None
-    entry = _load_sessions().get(tok)
-    if not entry:
-        return None
+    body, sig = tok.rsplit(".", 1)
+    if not hmac.compare_digest(sig, _sign(body)):
+        return None                                  # forged or wrong secret
     try:
-        issued = datetime.datetime.fromisoformat(entry["issued"])
+        data = json.loads(_b64d(body))
     except Exception:
         return None
-    if (datetime.datetime.now() - issued).days >= SESSION_DAYS:
-        revoke_token(tok)
+    if datetime.datetime.now().timestamp() > float(data.get("e", 0)):
         return None
-    return entry.get("identity")
+    if data.get("n") in _revoked():
+        return None
+    return data.get("i")
+
+
+def _revoked():
+    try:
+        with open(SESSION_FILE, "r", encoding="utf-8") as fh:
+            return set(json.load(fh).get("revoked", []))
+    except Exception:
+        return set()
+
+
+def _write_revoked(nonces):
+    try:
+        tmp = SESSION_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"revoked": sorted(nonces)[-5000:]}, fh)
+        os.replace(tmp, SESSION_FILE)
+        os.chmod(SESSION_FILE, 0o600)
+    except Exception:
+        pass
 
 
 def revoke_token(tok):
-    if not tok:
+    if not tok or "." not in tok:
         return
-    data = _load_sessions()
-    if data.pop(tok, None) is not None:
-        _save_sessions(data)
+    try:
+        data = json.loads(_b64d(tok.rsplit(".", 1)[0]))
+    except Exception:
+        return
+    n = data.get("n")
+    if n:
+        _write_revoked(_revoked() | {n})
 
 
 def revoke_all_for(identity):
-    """Used when an account is suspended, deleted or has its password reset."""
-    data = _load_sessions()
-    gone = [t for t, v in data.items() if v.get("identity") == identity]
-    for t in gone:
-        data.pop(t, None)
-    if gone:
-        _save_sessions(data)
-    return len(gone)
+    """Suspension/deletion: bump the account's epoch so its tokens stop working."""
+    db = load_db()
+    rec = db["users"].get(normalise_email(identity))
+    if rec is None:
+        return 0
+    rec["token_epoch"] = rec.get("token_epoch", 0) + 1
+    save_db(db)
+    return 1
+
+
+def token_still_good(db, identity, tok):
+    """Second check the app makes: the account exists, is active, and its
+    epoch hasn't moved since this token was handed out."""
+    rec = db["users"].get(normalise_email(identity))
+    if not rec or not rec.get("active", True):
+        return False
+    try:
+        issued_epoch = json.loads(_b64d(tok.rsplit(".", 1)[0])).get("ep", 0)
+    except Exception:
+        issued_epoch = 0
+    return issued_epoch >= rec.get("token_epoch", 0)
