@@ -694,6 +694,51 @@ with tab1:
             if _find_completed_file(os.path.join(batch_dir, vid_id), vid_id)
         )
 
+    TT_MIN_W, TT_MIN_H = 540, 960          # TikTok's stated minimum
+    TT_OUT_W, TT_OUT_H = 1080, 1920        # what we upscale to
+
+    def dl_fix_resolution(path):
+        """
+        Bring an undersized clip up to 1080x1920 so TikTok stops rejecting it.
+
+        Anything already >= 540x960 is left completely alone — re-encoding a
+        good file only loses quality. Non-9:16 material is letterboxed rather
+        than cropped, because cropping silently eats the creative.
+        Returns (changed, message).
+        """
+        w, h, _fps, _dur = ffmpeg_probe(path)
+        if not w or not h:
+            return False, "couldn't read size"
+        if w >= TT_MIN_W and h >= TT_MIN_H:
+            return False, f"{w}x{h} already fine"
+
+        out = path + ".fixed.mp4"
+        vf = (f"scale={TT_OUT_W}:{TT_OUT_H}:force_original_aspect_ratio=decrease:"
+              f"flags=lanczos,"
+              f"pad={TT_OUT_W}:{TT_OUT_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
+              f"unsharp=5:5:0.8:3:3:0.4,setsar=1,format=yuv420p")
+        cmd = [FFMPEG, "-y", "-v", "error", "-i", path, "-vf", vf,
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+               "-c:a", "copy", "-movflags", "+faststart", out]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=600)
+            if r.returncode != 0 or not os.path.exists(out):
+                # some clips have no audio stream to copy — retry re-encoding it
+                cmd[cmd.index("copy")] = "aac"
+                r = subprocess.run(cmd, capture_output=True, timeout=600)
+            if r.returncode == 0 and os.path.getsize(out) > 0:
+                os.replace(out, path)
+                return True, f"{w}x{h} -> {TT_OUT_W}x{TT_OUT_H}"
+            return False, (r.stderr.decode(errors="replace")[-160:] or "ffmpeg failed")
+        except Exception as e:
+            return False, str(e)
+        finally:
+            if os.path.exists(out):
+                try:
+                    os.unlink(out)
+                except Exception:
+                    pass
+
     def dl_execute_batch(batch_dir, manifest):
         """Download all videos of a batch (skipping ones already on disk), then offer the ZIP.
         Files stay on disk until everything succeeds, so an interrupted run can resume."""
@@ -708,13 +753,31 @@ with tab1:
                 max_workers=manifest.get("workers", 5),
             )
 
+            if downloaded and manifest.get("fix_resolution"):
+                status_text.markdown("📐 Checking resolutions…")
+                _fixbar = st.progress(0.0)
+                _fixed = _skipped = 0
+                for _i, _fp in enumerate(downloaded):
+                    _ch, _msg = dl_fix_resolution(_fp)
+                    if _ch:
+                        _fixed += 1
+                    elif "already fine" in _msg:
+                        _skipped += 1
+                    _fixbar.progress((_i + 1) / len(downloaded))
+                _fixbar.empty()
+                if _fixed:
+                    st.success(f"📐 Upscaled {_fixed} clip(s) to {TT_OUT_W}×{TT_OUT_H} "
+                               f"for TikTok" + (f" · {_skipped} already fine" if _skipped else ""))
+                elif _skipped:
+                    st.info(f"📐 All {_skipped} clip(s) already meet TikTok's minimum.")
+
             if downloaded:
                 # Write the ZIP to disk — it survives reruns/restarts, and the
                 # persistent "Ready ZIPs" section serves it reliably.
                 zip_path = os.path.join(
                     DL_ROOT, f"tiktok_videos_{os.path.basename(batch_dir)}.zip"
                 )
-                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
                     for fp in downloaded:
                         zf.write(fp, os.path.basename(fp))
 
@@ -940,12 +1003,22 @@ with tab1:
                                     label_visibility="collapsed")
 
             st.markdown("---")
+            dl_fix_res = st.checkbox(
+                "📐 Fix resolution for TikTok — upscale to 1080×1920 (9:16)",
+                value=True, key="dl_fix_res",
+                help="TikTok rejects anything under 540×960. Downloads often come "
+                     "back at 480×853, which triggers \"the resolution should be at "
+                     "least 540*960\". This re-scales undersized clips to a full "
+                     "1080×1920 with sharpening, and letterboxes anything that "
+                     "isn't already 9:16 rather than cropping your content.",
+            )
             _f1, _f2 = st.columns([3, 1])
             with _f2:
                 max_workers = st.slider(
                     "⚡ Parallel downloads", 1, 16, 8,
-                    help="How many videos to download at the same time. 5 is a safe default — go "
-                         "higher only if your connection is very fast and TikTok isn't rate-limiting you.",
+                    help="How many videos to download at the same time. 8 is a good "
+                         "default — go higher only if your connection is fast and "
+                         "TikTok isn't rate-limiting you.",
                 )
             with _f1:
                 st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
@@ -1086,6 +1159,7 @@ with tab1:
                 "created": datetime.datetime.now().isoformat(),
                 "videos": selected_videos,
                 "workers": max_workers,
+                "fix_resolution": bool(dl_fix_res),
                 "status": "in_progress",
             }
             dl_save_manifest(batch_dir, manifest)
@@ -1721,7 +1795,7 @@ with tab2:
                               os.path.getmtime(_zip_path) < max(
                                   os.path.getmtime(f["path"]) for f in _b["files"]))
                     if _stale:
-                        with zipfile.ZipFile(_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                        with zipfile.ZipFile(_zip_path, "w", zipfile.ZIP_STORED) as zf:
                             for fi in _b["files"]:
                                 zf.write(fi["path"], fi["name"])
                     _mb = os.path.getsize(_zip_path) / 1048576
@@ -1902,12 +1976,38 @@ with tab3:
         rid = uuid.uuid4().hex[:8].upper()
         return f"VID_{ts}_{rid}.{ext}"
 
+    def rm_ref_filename(original_name, ext, taken):
+        """Keep the original name and tag it _REF, so a batch stays traceable.
+        Re-refreshing an already-tagged file doesn't stack the suffix."""
+        stem = os.path.splitext(os.path.basename(original_name))[0].strip()
+        stem = re.sub(r"(_REF)(_\d+)?$", "", stem, flags=re.I) or "video"
+        name = f"{stem}_REF.{ext}"
+        n = 2
+        while name.lower() in taken:                # same stem twice in one batch
+            name = f"{stem}_REF_{n}.{ext}"
+            n += 1
+        taken.add(name.lower())
+        return name
+
     def rm_build_cmd(input_path, output_path, intensity, do_visual, do_audio, target_bitrate_k,
-                     device_profile, city_name, lat, lon, days_ago_max=10):
+                     device_profile, city_name, lat, lon, days_ago_max=10,
+                     fix_resolution=False):
         cmd = [FFMPEG, "-y", "-i", input_path]
 
+        vf_parts = []
         if do_visual:
-            cmd += ["-vf", rm_build_visual_filter(intensity)]
+            vf_parts.append(rm_build_visual_filter(intensity))
+        if fix_resolution:
+            w, h, _f, _d = ffmpeg_probe(input_path)
+            # only touch clips TikTok would actually reject
+            if w and h and (w < 540 or h < 960):
+                vf_parts.append(
+                    "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+                    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    "unsharp=5:5:0.8:3:3:0.4,setsar=1"
+                )
+        if vf_parts:
+            cmd += ["-vf", ",".join(vf_parts)]
         if do_audio:
             cmd += ["-af", rm_build_audio_filter(intensity)]
 
@@ -1939,7 +2039,8 @@ with tab3:
         return ((d, 1), (m, 1), (int(sec * 10000), 10000))
 
     def rm_refresh_image(in_path, out_path, device_profile, city_name, lat, lon,
-                         days_ago_max=10, do_visual=True, intensity="Medium", quality=95):
+                         days_ago_max=10, do_visual=True, intensity="Medium", quality=95,
+                         fix_resolution=False):
         """
         Strip an image's metadata and write a fresh, self-consistent EXIF block:
         same iPhone as the rest of the batch, a Saudi city, and a believable
@@ -1971,6 +2072,16 @@ with tab3:
             w, h = img.size
             if w > 8 and h > 8:
                 img = img.crop((1, 1, w - 1, h - 1)).resize((w, h), _Im.LANCZOS)
+
+        if fix_resolution:
+            # same rule as the video path: only lift what falls short
+            w, h = img.size
+            if w < 540 or h < 960:
+                ratio = min(1080 / w, 1920 / h)
+                img = img.resize((max(1, int(w * ratio)), max(1, int(h * ratio))),
+                                 _Im.LANCZOS)
+                from PIL import ImageFilter as _IF
+                img = img.filter(_IF.UnsharpMask(radius=2, percent=110, threshold=3))
 
         uid = uuid.uuid4().hex
         dt_str = local_dt.strftime("%Y:%m:%d %H:%M:%S")
@@ -2059,6 +2170,12 @@ with tab3:
         )
     with rm_col2:
         rm_do_visual = st.checkbox("Apply visual micro-changes (crop/zoom/color/noise)", value=True)
+        rm_fix_res = st.checkbox(
+            "📐 Fix resolution for TikTok — upscale to 1080×1920", value=True,
+            key="rm_fix_res",
+            help="TikTok rejects anything under 540×960. Clips already at or above "
+                 "that are left untouched so they aren't re-scaled for nothing.",
+        )
         rm_do_audio  = st.checkbox("Apply audio pitch micro-shift", value=True)
     with rm_col3:
         rm_bitrate = st.slider("Output bitrate (kbps)", 2000, 6000, 4000, step=250)
@@ -2084,6 +2201,7 @@ with tab3:
 
         # Shuffle Saudi cities so consecutive videos don't repeat locations;
         # if there are more videos than cities, cycle through again.
+        rm_taken_names = set()
         rm_city_pool = RM_SAUDI_LOCATIONS.copy()
         random.shuffle(rm_city_pool)
         rm_device = st.session_state.rm_device
@@ -2096,7 +2214,8 @@ with tab3:
                 f.write(rm_file.getbuffer())
 
             _is_img = rm_is_image(rm_file.name)
-            out_name = rm_random_filename(ext="jpg" if _is_img else "mp4")
+            out_name = rm_ref_filename(rm_file.name, "jpg" if _is_img else "mp4",
+                                       rm_taken_names)
             out_path = os.path.join(tempfile.gettempdir(), out_name)
 
             try:
@@ -2109,6 +2228,7 @@ with tab3:
                         meta_info = rm_refresh_image(
                             in_path, out_path, rm_device, city_name, city_lat, city_lon,
                             days_ago_max, do_visual=rm_do_visual, intensity=rm_intensity,
+                            fix_resolution=rm_fix_res,
                         )
                         st.success(f"✅ `{rm_file.name}` → `{out_name}`")
                         st.markdown(
@@ -2131,7 +2251,8 @@ with tab3:
 
                 cmd, meta_info = rm_build_cmd(
                     in_path, out_path, rm_intensity, rm_do_visual, rm_do_audio, rm_bitrate,
-                    rm_device, city_name, city_lat, city_lon, days_ago_max
+                    rm_device, city_name, city_lat, city_lon, days_ago_max,
+                    fix_resolution=rm_fix_res,
                 )
 
                 dur = get_duration_seconds(in_path) or 0
@@ -2175,7 +2296,7 @@ with tab3:
         st.markdown("---")
         if rm_results:
             zip_buf = BytesIO()
-            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_STORED) as zf:
                 for r in rm_results:
                     try:
                         zf.write(r["path"], r["name"])
@@ -2485,7 +2606,7 @@ with tab4:
 
                         if downloaded_files:
                             zip_buf = BytesIO()
-                            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_STORED) as zf:
                                 for fp in downloaded_files:
                                     zf.write(fp, os.path.basename(fp))
                             zip_buf.seek(0)
@@ -2644,7 +2765,7 @@ with tab5:
                 )
             else:
                 ea_zip = BytesIO()
-                with zipfile.ZipFile(ea_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                with zipfile.ZipFile(ea_zip, "w", zipfile.ZIP_STORED) as zf:
                     for r in ea_results:
                         zf.writestr(r["name"], r["data"])
                 ea_zip.seek(0)
@@ -3343,7 +3464,7 @@ with tab7:
 
             if len(ok) > 1:
                 zip_buf = BytesIO()
-                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_STORED) as zf:
                     for r in ok:
                         zf.writestr(f"{os.path.splitext(r['name'])[0]}_studio.{r['ext']}", r["data"])
                 st.markdown("---")
