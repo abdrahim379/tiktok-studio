@@ -18,6 +18,7 @@ import streamlit.components.v1 as components
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import studio_auth as auth
+import studio_db
 
 st.set_page_config(page_title="Admin · Ecom Studio", page_icon="⚙️",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -410,6 +411,39 @@ with tab_sys:
             auth.save_db(db)
             st.success("Updated." + ("" if ap else " (password unchanged)"))
             st.rerun()
+
+    st.markdown("### Where accounts are stored")
+    _be, _why = studio_db.describe()
+    if _be == "file":
+        st.error(
+            "⚠️ **No database connected.** " + _why + "  \n"
+            "This is why the accounts disappeared — they were only ever in a file "
+            "inside the container."
+        )
+        with st.expander("Connect a free permanent database (5 minutes)", expanded=True):
+            st.markdown(
+                "1. Create a free project at **[neon.tech](https://neon.tech)** or "
+                "**[supabase.com](https://supabase.com)** — both have a free tier "
+                "that is plenty for this.\n"
+                "2. Copy the **connection string** they give you. It looks like "
+                "`postgresql://user:password@host/dbname`.\n"
+                "3. On Streamlit Cloud open your app → **Settings → Secrets** and "
+                "add the line below, then save. The app restarts and the accounts "
+                "live in the database from then on — surviving sleeps, restarts "
+                "and redeploys."
+            )
+            st.code('DATABASE_URL = "postgresql://user:password@host/dbname"',
+                    language="toml")
+            st.caption("Whatever accounts exist when you connect it are copied into "
+                       "the database automatically on the first load.")
+    else:
+        _ok, _msg = studio_db.healthy()
+        if _ok:
+            st.success(f"✅ **{_be}** — {_why}")
+        else:
+            st.error(f"❌ **{_be}** configured but unreachable: {_msg}  \n"
+                     f"The app is running on the local file until it comes back, "
+                     f"so nothing is lost right now — but fix this before relying on it.")
 
     st.markdown("### Staying signed in")
     if auth.secret_is_persistent():

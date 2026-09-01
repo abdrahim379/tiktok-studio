@@ -23,6 +23,8 @@ import hmac
 import secrets
 import datetime
 
+import studio_db
+
 DB_FILE = os.environ.get("STUDIO_USERS_DB", "studio_users.json")
 
 # The tools the admin can hand out. Keys must match the main app's tab keys.
@@ -87,31 +89,22 @@ def default_db():
 
 
 def load_db():
-    db = default_db()
-    try:
-        with open(DB_FILE, "r", encoding="utf-8") as fh:
-            saved = json.load(fh)
+    """Whole config, from whichever backend studio_db selected."""
+    cfg = default_db()
+    saved = studio_db.load_state()
+    if saved:
         for section, value in saved.items():
-            if isinstance(value, dict) and isinstance(db.get(section), dict):
-                db[section].update(value)
+            if isinstance(value, dict) and isinstance(cfg.get(section), dict):
+                cfg[section].update(value)
             else:
-                db[section] = value
-    except Exception:
-        pass                                   # first run or unreadable -> defaults
+                cfg[section] = value
     for k in TOOL_KEYS:                        # a tool added later defaults to on
-        db["tools_enabled"].setdefault(k, True)
-    return db
+        cfg["tools_enabled"].setdefault(k, True)
+    return cfg
 
 
 def save_db(db):
-    tmp = DB_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(db, fh, indent=2, ensure_ascii=False)
-    os.replace(tmp, DB_FILE)
-    try:
-        os.chmod(DB_FILE, 0o600)               # it holds hashes and API keys
-    except Exception:
-        pass
+    studio_db.save_state(db)
 
 
 # ── accounts ────────────────────────────────────────────────────────────
