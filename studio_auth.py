@@ -82,6 +82,7 @@ def default_db():
         "api": {"groq_api_key": "", "serpapi_key": ""},
         "tools_enabled": {k: True for k in TOOL_KEYS},   # global kill-switch
         "settings": {"allow_signup": True,
+                     "open_access_enabled": True,
                      "signup_message": "Your account has been created. An "
                                        "administrator needs to grant you access "
                                        "to the tools before you can use them."},

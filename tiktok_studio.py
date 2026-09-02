@@ -147,13 +147,13 @@ html,body,.stApp,[class*="css"]{font-family:var(--ts-font)!important;color:var(-
   border:1px solid #DFE3F7;white-space:nowrap;}
 
 /* ── Tabs ─────────────────────────────────────────────── */
-.stTabs [data-baseweb="tab-list"]{gap:6px;flex-wrap:wrap;background:transparent;
+.stTabs [data-baseweb="tab-list"],.stTabs [role="tablist"]{gap:6px;flex-wrap:wrap;background:transparent;
   border-bottom:1px solid var(--ts-border);padding-bottom:10px;margin-bottom:10px;}
-.stTabs [data-baseweb="tab"]{height:auto;padding:8px 14px;border-radius:8px;
+.stTabs [data-baseweb="tab"],.stTabs [data-testid="stTab"]{height:auto;padding:8px 14px;border-radius:8px;
   background:transparent;border:1px solid transparent;
   color:var(--ts-muted)!important;font-weight:500;font-size:.875rem;letter-spacing:-.005em;
   transition:background .14s ease,color .14s ease,border-color .14s ease;}
-.stTabs [data-baseweb="tab"]:hover{background:var(--ts-surface2);color:var(--ts-text)!important;}
+.stTabs [data-baseweb="tab"]:hover,.stTabs [data-testid="stTab"]:hover{background:var(--ts-surface2);color:var(--ts-text)!important;}
 .stTabs [aria-selected="true"]{background:var(--ts-surface)!important;
   border-color:var(--ts-border)!important;color:var(--ts-cyan)!important;font-weight:600;
   box-shadow:var(--ts-shadow);}
@@ -377,28 +377,50 @@ def _render_login():
     st.stop()
 
 
-if not st.session_state.get("user_email"):
-    _render_login()
+# pages/all.py runs this same script with OPEN_ACCESS set in its exec globals,
+# which is what serves /all. It is deliberately NOT an environment variable or
+# a module global: those are shared across every session in the process, so one
+# visit to /all would have switched auth off for everybody on / as well.
+OPEN_ACCESS = bool(globals().get("ECOM_OPEN_ACCESS", False))
+if OPEN_ACCESS and not CFG["settings"].get("open_access_enabled", True):
+    OPEN_ACCESS = False                      # admin switched the door off
+    st.error("🔒 Open access is turned off. Ask the administrator, or sign in "
+             "on the [main page](/).")
+    st.stop()
 
-USER_EMAIL = st.session_state.user_email
-USER = CFG["users"].get(USER_EMAIL)
-if not USER or not USER.get("active", True):
-    st.session_state.pop("user_email", None)
-    st.query_params.clear()
-    st.rerun()
+if OPEN_ACCESS:
+    USER_EMAIL, USER = "", {"name": "Guest"}
+    MY_TOOLS = [k for k, _ in TOOL_REGISTRY if CFG["tools_enabled"].get(k, True)]
+    render_hero("Ecom Studio",
+                f"Open access — all {len(MY_TOOLS)} tool(s), no sign-in needed",
+                len(MY_TOOLS))
+    with st.sidebar:
+        st.markdown("**Guest**")
+        st.caption("Open access mode")
+        st.caption("Anyone with this link can use every tool.")
+else:
+    if not st.session_state.get("user_email"):
+        _render_login()
 
-MY_TOOLS = auth.allowed_tools(CFG, USER_EMAIL)
+    USER_EMAIL = st.session_state.user_email
+    USER = CFG["users"].get(USER_EMAIL)
+    if not USER or not USER.get("active", True):
+        st.session_state.pop("user_email", None)
+        st.query_params.clear()
+        st.rerun()
 
-render_hero("Ecom Studio",
-            f"Signed in as <b>{USER.get('name', USER_EMAIL)}</b> — "
-            f"{len(MY_TOOLS)} tool(s) available to you",
-            len(MY_TOOLS))
+    MY_TOOLS = auth.allowed_tools(CFG, USER_EMAIL)
 
-with st.sidebar:
-    st.markdown(f"**{USER.get('name', USER_EMAIL)}**")
-    st.caption(USER_EMAIL)
-    if st.button("Sign out", use_container_width=True, key="sb_out"):
-        _sign_out()
+    render_hero("Ecom Studio",
+                f"Signed in as <b>{USER.get('name', USER_EMAIL)}</b> — "
+                f"{len(MY_TOOLS)} tool(s) available to you",
+                len(MY_TOOLS))
+
+    with st.sidebar:
+        st.markdown(f"**{USER.get('name', USER_EMAIL)}**")
+        st.caption(USER_EMAIL)
+        if st.button("Sign out", use_container_width=True, key="sb_out"):
+            _sign_out()
 
 # An account with nothing granted gets a holding screen, by design.
 if not MY_TOOLS:
@@ -423,8 +445,10 @@ _sink = _tab_objs[-1] if _disabled else _tab_objs[0]
 
 if _disabled:
     st.markdown(
-        '<style>.stTabs [data-baseweb="tab-list"] '
-        'button[data-baseweb="tab"]:last-of-type{display:none!important;}</style>',
+        '<style>'
+        '.stTabs [data-baseweb="tab-list"] button[data-baseweb="tab"]:last-of-type,'
+        '.stTabs [role="tablist"] [data-testid="stTab"]:last-of-type'
+        '{display:none!important;}</style>',
         unsafe_allow_html=True,
     )
 
