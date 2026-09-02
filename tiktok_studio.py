@@ -1468,117 +1468,128 @@ with tab2:
             return None, None, None
 
     # ---- Sidebar-style options inside tab ----
-    with st.expander("⚙️ Options", expanded=True):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            use_ultra_stable = st.checkbox("Mode ultra-stable (libx264/veryfast)", value=True)
-            use_hw_decode = st.checkbox("Hardware decode (Videotoolbox)", value=False)
-            zoom_mode = st.radio("Creative zoom mode", ["zoom + crop", "zoom inverse + pad", "aucun"], index=0)
-            vg_threads = st.select_slider(
-                "Encoder threads",
-                options=["Auto (fastest)"] + [str(n) for n in (1, 2, 4, 6, 8, 12, 16) if n <= VG_CPU_COUNT],
-                value="Auto (fastest)",
-                help=f"This machine has {VG_CPU_COUNT} cores. Auto uses them all — that is the "
-                     f"fastest. Lower it only if you want to keep the laptop usable while encoding.",
-            )
-            SAFE_THREADS[:] = ["-threads", "0" if vg_threads.startswith("Auto") else vg_threads]
-        with col_b:
-            selected_variants = st.multiselect(
-                "Variants to generate",
-                options=["1", "2", "3", "4", "5"],
-                default=["1", "2", "3", "4"],
-                help="1=Base | 2=+Intro+Hook | 3=+Pitch+1% | 4=+Pitch-1% | 5=Border/Overlay",
-            )
-            hook_type = st.selectbox("Hook type (V2/V3/V4)", ["None", "Image overlay", "Video prepend", "Video overlay"])
+    # One form for every option: Streamlit reruns the whole script on any
+    # widget change, which meant each tweak re-executed all eight tabs.
+    # Inside a form nothing reaches the server until Generate is pressed.
+    with st.form("vg_options", border=False):
+        with st.expander("⚙️ Options", expanded=True):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                use_ultra_stable = st.checkbox("Mode ultra-stable (libx264/veryfast)", value=True)
+                use_hw_decode = st.checkbox("Hardware decode (Videotoolbox)", value=False)
+                zoom_mode = st.radio("Creative zoom mode", ["zoom + crop", "zoom inverse + pad", "aucun"], index=0)
+                vg_threads = st.select_slider(
+                    "Encoder threads",
+                    options=["Auto (fastest)"] + [str(n) for n in (1, 2, 4, 6, 8, 12, 16) if n <= VG_CPU_COUNT],
+                    value="Auto (fastest)",
+                    help=f"This machine has {VG_CPU_COUNT} cores. Auto uses them all — that is the "
+                         f"fastest. Lower it only if you want to keep the laptop usable while encoding.",
+                )
+                SAFE_THREADS[:] = ["-threads", "0" if vg_threads.startswith("Auto") else vg_threads]
+            with col_b:
+                selected_variants = st.multiselect(
+                    "Variants to generate",
+                    options=["1", "2", "3", "4", "5"],
+                    default=["1", "2", "3", "4"],
+                    help="1=Base | 2=+Intro+Hook | 3=+Pitch+1% | 4=+Pitch-1% | 5=Border/Overlay",
+                )
+                hook_type = st.selectbox("Hook type (V2/V3/V4)", ["None", "Image overlay", "Video prepend", "Video overlay"])
 
-    with st.expander("🎣 Hook & Overlay files"):
-        hook_img = None
-        hook_vid = None
-        hook_keep_audio = False
+        with st.expander("🎣 Hook & Overlay files"):
+            hook_img = None
+            hook_vid = None
+            hook_keep_audio = False
 
-        if hook_type == "Image overlay":
-            hook_img = st.file_uploader("Hook image (PNG/JPG)", type=["png", "jpg", "jpeg"], key="vg_hook_img")
-        elif hook_type in ("Video prepend", "Video overlay"):
-            hook_vid = st.file_uploader("Hook video (mp4/mov)", type=["mp4", "mov", "m4v"], key="vg_hook_vid")
-            if hook_type == "Video prepend":
-                hook_keep_audio = st.checkbox("Keep hook audio (prepend)", value=True)
+            # All three are always shown. Inside a form nothing re-renders until
+            # submit, so hiding them behind the mode would leave you unable to
+            # reach the uploader you just selected. Only the chosen one is used.
+            st.caption("Fill in whichever matches the hook type you picked above.")
+            hook_img = st.file_uploader("Hook image (PNG/JPG)", type=["png", "jpg", "jpeg"],
+                                        key="vg_hook_img")
+            hook_vid = st.file_uploader("Hook video (mp4/mov)", type=["mp4", "mov", "m4v"],
+                                        key="vg_hook_vid")
+            hook_keep_audio = st.checkbox("Keep hook audio (video prepend only)", value=True,
+                                          key="vg_hook_keep")
 
-    st.markdown("### 🖼️ Variant 5 — Border")
-    v5_mode = st.radio(
-        "Style", ["Colour border", "Overlay PNG"], horizontal=True, key="vg_v5_mode",
-        help="A colour border is drawn straight onto the video — no file needed.",
-    )
-
-    overlay_img = None
-    border_hex = None
-    border_thick = 9
-    border_margin = 8
-
-    if v5_mode == "Colour border":
-        # Sizes are a fraction of the 1080px frame width, so the frame reads the
-        # same at any resolution. "Thin" matches the reference border: a hairline
-        # sitting tight to the edge, not a chunky band.
-        VG_BORDER_SIZES = {
-            "Hairline":            (0.0046, 0.0055),
-            "Thin (recommended)":  (0.0085, 0.0074),
-            "Medium":              (0.0150, 0.0110),
-            "Bold":                (0.0260, 0.0165),
-        }
-        _s1, _s2 = st.columns([1, 1])
-        with _s1:
-            _names = list(VG_BORDER_COLORS.keys()) + ["Custom…"]
-            _pick = st.selectbox("Colour", _names, index=0, key="vg_bcolor")
-            border_hex = (st.color_picker("Pick a colour", "#FFDD57", key="vg_bcustom")
-                          if _pick == "Custom…" else VG_BORDER_COLORS[_pick])
-        with _s2:
-            _size = st.select_slider(
-                "Border size", options=list(VG_BORDER_SIZES.keys()) + ["Custom"],
-                value="Thin (recommended)", key="vg_bsize",
-            )
-
-        if _size == "Custom":
-            _c1, _c2 = st.columns(2)
-            border_thick = _c1.slider("Thickness (px)", 2, 90, 9, 1, key="vg_bthick")
-            border_margin = _c2.slider("Inset from edge (px)", 0, 90, 8, 1, key="vg_bmargin")
-        else:
-            _tp, _mp = VG_BORDER_SIZES[_size]
-            border_thick = max(2, round(TARGET_W * _tp))
-            border_margin = max(0, round(TARGET_W * _mp))
-
-        # true-to-scale preview: same ratios as the real 1080x1920 output
-        _pw, _ph = 104, 185
-        _k = _pw / TARGET_W
-        _sm, _st_ = border_margin * _k, max(0.7, border_thick * _k)
-        st.markdown(
-            f'<div style="display:flex;align-items:center;gap:16px;margin-top:8px;">'
-            f'  <div style="width:{_pw}px;height:{_ph}px;background:#8C98A4;border-radius:5px;'
-            f'       position:relative;flex:0 0 auto;overflow:hidden;">'
-            f'    <div style="position:absolute;left:{_sm}px;top:{_sm}px;'
-            f'         right:{_sm}px;bottom:{_sm}px;'
-            f'         border:{_st_}px solid {border_hex};box-sizing:border-box;"></div>'
-            f'  </div>'
-            f'  <div style="font-size:.85rem;color:var(--ts-muted);line-height:1.6;">'
-            f'    <b style="color:var(--ts-text)">Variant 5 preview</b> — true to scale<br>'
-            f'    <code>{border_hex}</code> · {border_thick}px thick · {border_margin}px inset'
-            f'    <br>on a 1080×1920 frame</div>'
-            f'</div>',
-            unsafe_allow_html=True,
+        st.markdown("### 🖼️ Variant 5 — Border")
+        v5_mode = st.radio(
+            "Style", ["Colour border", "Overlay PNG"], horizontal=True, key="vg_v5_mode",
+            help="A colour border is drawn straight onto the video — no file needed.",
         )
-    else:
+
+        overlay_img = None
+        border_hex = None
+        border_thick = 9
+        border_margin = 8
+
+        if True:
+            # Sizes are a fraction of the 1080px frame width, so the frame reads the
+            # same at any resolution. "Thin" matches the reference border: a hairline
+            # sitting tight to the edge, not a chunky band.
+            VG_BORDER_SIZES = {
+                "Hairline":            (0.0046, 0.0055),
+                "Thin (recommended)":  (0.0085, 0.0074),
+                "Medium":              (0.0150, 0.0110),
+                "Bold":                (0.0260, 0.0165),
+            }
+            _s1, _s2 = st.columns([1, 1])
+            with _s1:
+                _names = list(VG_BORDER_COLORS.keys()) + ["Custom…"]
+                _pick = st.selectbox("Colour", _names, index=0, key="vg_bcolor")
+                border_hex = (st.color_picker("Pick a colour", "#FFDD57", key="vg_bcustom")
+                              if _pick == "Custom…" else VG_BORDER_COLORS[_pick])
+            with _s2:
+                _size = st.select_slider(
+                    "Border size", options=list(VG_BORDER_SIZES.keys()) + ["Custom"],
+                    value="Thin (recommended)", key="vg_bsize",
+                )
+
+            if _size == "Custom":
+                _c1, _c2 = st.columns(2)
+                border_thick = _c1.slider("Thickness (px)", 2, 90, 9, 1, key="vg_bthick")
+                border_margin = _c2.slider("Inset from edge (px)", 0, 90, 8, 1, key="vg_bmargin")
+            else:
+                _tp, _mp = VG_BORDER_SIZES[_size]
+                border_thick = max(2, round(TARGET_W * _tp))
+                border_margin = max(0, round(TARGET_W * _mp))
+
+            # true-to-scale preview: same ratios as the real 1080x1920 output
+            _pw, _ph = 104, 185
+            _k = _pw / TARGET_W
+            _sm, _st_ = border_margin * _k, max(0.7, border_thick * _k)
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:16px;margin-top:8px;">'
+                f'  <div style="width:{_pw}px;height:{_ph}px;background:#8C98A4;border-radius:5px;'
+                f'       position:relative;flex:0 0 auto;overflow:hidden;">'
+                f'    <div style="position:absolute;left:{_sm}px;top:{_sm}px;'
+                f'         right:{_sm}px;bottom:{_sm}px;'
+                f'         border:{_st_}px solid {border_hex};box-sizing:border-box;"></div>'
+                f'  </div>'
+                f'  <div style="font-size:.85rem;color:var(--ts-muted);line-height:1.6;">'
+                f'    <b style="color:var(--ts-text)">Variant 5 preview</b> — true to scale<br>'
+                f'    <code>{border_hex}</code> · {border_thick}px thick · {border_margin}px inset'
+                f'    <br>on a 1080×1920 frame</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
         overlay_img = st.file_uploader(
-            "Overlay/Border PNG (transparent)", type=["png"], key="vg_overlay"
+            "…or upload a border PNG instead (used only when Style = Overlay PNG)",
+            type=["png"], key="vg_overlay",
+        )
+        if v5_mode != "Colour border":
+            border_hex = None            # PNG mode wins
+
+        st.markdown("### 📥 Videos to process")
+        videos = st.file_uploader(
+            "Drop one or more videos",
+            type=["mp4", "mov", "m4v"],
+            accept_multiple_files=True,
+            key="vg_videos",
         )
 
-    st.markdown("### 📥 Videos to process")
-    videos = st.file_uploader(
-        "Drop one or more videos",
-        type=["mp4", "mov", "m4v"],
-        accept_multiple_files=True,
-        key="vg_videos",
-    )
-
-    st.markdown("---")
-    run_btn = st.button("🚀 Generate Selected Variants", type="primary")
+        st.markdown("---")
+        run_btn = st.form_submit_button("🚀 Generate Selected Variants",
+                                        type="primary", use_container_width=True)
 
     if run_btn and videos:
         if not selected_variants:
