@@ -445,6 +445,25 @@ with tab_sys:
                      f"The app is running on the local file until it comes back, "
                      f"so nothing is lost right now — but fix this before relying on it.")
 
+    st.markdown("### Snapshot into Secrets (no signup needed)")
+    st.caption(
+        "Streamlit Secrets survive redeploys, so pasting your accounts there "
+        "makes them come back automatically whenever the container is rebuilt. "
+        "It is read-only, so re-paste after adding people — or connect "
+        "DATABASE_URL above and it happens by itself."
+    )
+    _snap = json.dumps(db, ensure_ascii=False, separators=(",", ":"))
+    _seeded = bool(studio_db.seed_from_secrets())
+    st.caption("ACCOUNTS_JSON currently in Secrets: "
+               + ("yes" if _seeded else "no")
+               + f" · snapshot is {len(_snap)/1024:.1f} KB, "
+                 f"{len(db['users'])} account(s)")
+    with st.expander("Show the line to paste into Settings → Secrets"):
+        _q = "'''"
+        st.code("ACCOUNTS_JSON = " + _q + _snap + _q, language="toml")
+        st.caption("Copy the whole block including the triple quotes. It holds "
+                   "password hashes and API keys — treat it like a password.")
+
     st.markdown("### Staying signed in")
     if auth.secret_is_persistent():
         st.success("✅ `AUTH_SECRET` is configured — sign-ins survive restarts and redeploys.")

@@ -137,10 +137,36 @@ def _file_save(state):
         pass
 
 
+def seed_from_secrets():
+    """
+    Accounts pasted into Streamlit Secrets as ACCOUNTS_JSON.
+
+    Secrets are the one thing on Streamlit Cloud that survive a redeploy
+    without any external service, so this is the zero-setup way to make
+    accounts durable: export from the admin panel, paste into Secrets, and
+    the app rebuilds from it whenever the container comes back empty.
+    Read-only — the app can't write secrets, so new sign-ups still need to be
+    exported again (or use DATABASE_URL, which is automatic).
+    """
+    try:
+        import streamlit as st
+        raw = st.secrets.get("ACCOUNTS_JSON", "") or ""
+    except Exception:
+        raw = ""
+    raw = raw or os.environ.get("ACCOUNTS_JSON", "")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) and "users" in data else None
+    except Exception:
+        return None
+
+
 def load_state():
     """Whole state dict, or None when nothing has been stored yet."""
     if backend() == "file":
-        return _file_load()
+        return _file_load() or seed_from_secrets()
     try:
         conn, _ph = _connect()
         try:
@@ -153,7 +179,7 @@ def load_state():
                 return json.loads(row[0])
             # first run against an empty database — adopt whatever the local
             # file has so an existing setup carries over instead of resetting
-            seeded = _file_load()
+            seeded = _file_load() or seed_from_secrets()
             if seeded:
                 save_state(seeded)
                 return seeded
@@ -161,7 +187,8 @@ def load_state():
         finally:
             conn.close()
     except Exception:
-        return _file_load()      # unreachable database must not take the app down
+        # an unreachable database must not take the app down
+        return _file_load() or seed_from_secrets()
 
 
 def save_state(state):
