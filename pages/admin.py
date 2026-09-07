@@ -383,12 +383,15 @@ with tab_sys:
 
     st.markdown("### Open access (/all)")
     _oa = db["settings"].get("open_access_enabled", True)
-    st.warning(
-        "**/all lets anyone use every tool with no sign-in.** Whoever has the "
-        "link can spend your Groq and SerpAPI credit, and permissions do not "
-        "apply there. Only share it with people you would have given full "
-        "access to anyway."
-    ) if _oa else st.info("/all is currently switched off.")
+    if _oa:
+        st.warning(
+            "**/all lets anyone use every tool with no sign-in.** Whoever has the "
+            "link can spend your Groq and SerpAPI credit, and permissions do not "
+            "apply there. Only share it with people you would have given full "
+            "access to anyway."
+        )
+    else:
+        st.info("/all is currently switched off.")
     _oa_new = st.toggle("Enable /all", value=_oa, key="oa_on")
     if st.button("💾 Save open access", type="primary", key="oa_save"):
         db["settings"]["open_access_enabled"] = _oa_new
