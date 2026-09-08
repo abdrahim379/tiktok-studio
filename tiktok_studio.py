@@ -2959,7 +2959,23 @@ with tab6:
             et_status = st.empty()
             total = len(et_files)
 
-            with et_status, st.spinner(f"Loading `{et_model_size}` model (first time downloads it)..."):
+            # The first use of a size downloads the model, which is a big silent
+            # wait (~2 min for base on a normal connection, much longer for
+            # medium/large) and reads as a hung app if it isn't announced.
+            _SIZES = {"base": "~150 MB", "small": "~500 MB",
+                      "medium": "~1.5 GB", "large-v3": "~3 GB"}
+            _cached = os.path.isdir(os.path.expanduser(
+                f"~/.cache/huggingface/hub/models--Systran--faster-whisper-{et_model_size}"))
+            if not _cached:
+                st.info(
+                    f"⏬ First run with **{et_model_size}** — downloading the model "
+                    f"({_SIZES.get(et_model_size, '')}). This happens once; it is "
+                    f"cached afterwards. It can take several minutes and the page "
+                    f"will look idle while it runs — that is expected."
+                )
+            with et_status, st.spinner(
+                    f"{'Loading' if _cached else 'Downloading'} the "
+                    f"`{et_model_size}` model…"):
                 et_model = et_load_model(et_model_size)
 
             with tempfile.TemporaryDirectory() as et_tmpdir:
@@ -3006,7 +3022,33 @@ with tab6:
                             vad_filter=True,
                             vad_parameters={"min_silence_duration_ms": 500},
                         )
-                        text = "\n".join(s.text.strip() for s in segments).strip()
+                        # transcribe() returns a generator, so nothing runs until
+                        # the segments are consumed. Draining it by hand gives a
+                        # real within-file progress bar and a live transcript
+                        # instead of one long unexplained pause.
+                        _total_s = info.duration or ffmpeg_probe(wav_path)[3] or 0
+                        _fbar = st.progress(0.0)
+                        _fpct = st.empty()
+                        _fprev = st.empty()
+                        _parts = []
+                        for _seg in segments:
+                            _parts.append(_seg.text.strip())
+                            if _total_s:
+                                _fbar.progress(min(1.0, _seg.end / _total_s))
+                                _fpct.caption(
+                                    f"⏱️ {_seg.end:,.0f}s of {_total_s:,.0f}s "
+                                    f"({min(100, _seg.end / _total_s * 100):.0f}%) — "
+                                    f"{len(_parts)} segment(s)"
+                                )
+                            else:
+                                _fpct.caption(f"{len(_parts)} segment(s) transcribed…")
+                            _fprev.markdown(
+                                "> " + " ".join(_parts[-2:])[-160:]
+                            )
+                        _fbar.progress(1.0)
+                        _fbar.empty(); _fpct.empty(); _fprev.empty()
+
+                        text = "\n".join(_parts).strip()
                         st.session_state.et_results.append({
                             "name": et_file.name,
                             "text": text or "(no speech detected)",

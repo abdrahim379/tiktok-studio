@@ -7,3 +7,8 @@ textColor = "#212B36"
 
 [browser]
 gatherUsageStats = false
+
+[server]
+# Default is 200MB, which a handful of TikTok clips can pass in one batch.
+maxUploadSize = 2000
+maxMessageSize = 2000
