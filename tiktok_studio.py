@@ -377,13 +377,27 @@ def _render_login():
     st.stop()
 
 
-# pages/all.py runs this same script with OPEN_ACCESS set in its exec globals,
-# which is what serves /all. It is deliberately NOT an environment variable or
-# a module global: those are shared across every session in the process, so one
-# visit to /all would have switched auth off for everybody on / as well.
-OPEN_ACCESS = bool(globals().get("ECOM_OPEN_ACCESS", False))
-if OPEN_ACCESS and not CFG["settings"].get("open_access_enabled", True):
-    OPEN_ACCESS = False                      # admin switched the door off
+# ── Sign-in switch ──────────────────────────────────────────────────────
+# Login is OFF for now. Streamlit Cloud wipes the container filesystem on
+# every redeploy, so the account store kept emptying and people were locked
+# out of their own tools. Until the app moves somewhere with a real database,
+# everything is open on the main page.
+#
+# Nothing was deleted: the whole accounts/permissions/admin system is intact
+# below and at /admin. Flip this one line back to True to bring the gate back.
+REQUIRE_LOGIN = False
+
+# pages/all.py runs this same script with ECOM_OPEN_ACCESS set in its exec
+# globals, which is what serves /all. It is deliberately NOT an environment
+# variable or a module global: those are shared across every session in the
+# process, so one visit to /all would have switched auth off for everybody.
+OPEN_ACCESS = bool(globals().get("ECOM_OPEN_ACCESS", False)) or not REQUIRE_LOGIN
+
+# The admin's "open access" kill switch only governs the /all route. With
+# REQUIRE_LOGIN off there is no gate to enforce anyway, so honouring it on the
+# main page would just lock everyone out of an app that has no way back in.
+if (OPEN_ACCESS and REQUIRE_LOGIN
+        and not CFG["settings"].get("open_access_enabled", True)):
     st.error("🔒 Open access is turned off. Ask the administrator, or sign in "
              "on the [main page](/).")
     st.stop()
