@@ -546,6 +546,26 @@ with tab1:
                     return fpath
         return None
 
+    def _has_audio(path):
+        """True when the file really carries an audio stream."""
+        try:
+            r = subprocess.run(
+                [FFPROBE, "-v", "error", "-select_streams", "a",
+                 "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+                capture_output=True, text=True, timeout=30)
+            if r.returncode == 0:
+                return "audio" in r.stdout
+        except Exception:
+            pass
+        if not HAVE_FFPROBE:                 # no ffprobe: fall back to ffmpeg -i
+            try:
+                r = subprocess.run([FFMPEG, "-hide_banner", "-i", path],
+                                   capture_output=True, text=True, timeout=30)
+                return "Audio:" in (r.stderr or "")
+            except Exception:
+                pass
+        return True                          # can't tell -> don't block the download
+
     def _download_one(vid_id, vid_url, output_dir, start_delay=0):
         """Download a single video into its own subdirectory. Returns (vid_id, filepath|None, err|None)."""
         vid_dir = os.path.join(output_dir, vid_id)
@@ -570,7 +590,20 @@ with tab1:
         #  * --sleep-requests 1 was throttling every request by a second on
         #    purpose; dropped, with the retry backoff left in place to stay
         #    polite when TikTok actually pushes back.
-        FORMAT_ATTEMPTS = ["best[ext=mp4]/best", "bestvideo+bestaudio/best", "worst"]
+        # Format choice is load-bearing here. TikTok's bytevc1/HEVC renditions
+        # advertise acodec=aac in the metadata but are delivered video-only, so
+        # plain "best" grabs a silent 1080p file — muting every variant and
+        # breaking Extract Audio outright. The h264 renditions really do carry
+        # the audio track, so they are preferred even though they are 720p;
+        # the app upscales to 1080x1920 anyway. avc1 is not matched by this
+        # extractor, h264 is.
+        FORMAT_ATTEMPTS = [
+            "best[vcodec^=h264][acodec!=none]",
+            "bestvideo[vcodec^=h264]+bestaudio",
+            "best[acodec!=none]",
+            "bestvideo+bestaudio/best",
+            "best",
+        ]
         last_err = ""
 
         for fmt in FORMAT_ATTEMPTS:
@@ -601,7 +634,17 @@ with tab1:
             if result.returncode == 0:
                 fpath = _find_completed_file(vid_dir, vid_id)
                 if fpath:
-                    return vid_id, fpath, None
+                    # Trust the file, not the metadata: TikTok lies about aac
+                    # on HEVC. If this rendition came back silent, drop it and
+                    # let the next format in the list try.
+                    if _has_audio(fpath) or fmt is FORMAT_ATTEMPTS[-1]:
+                        return vid_id, fpath, None
+                    try:
+                        os.unlink(fpath)
+                    except Exception:
+                        pass
+                    last_err = "downloaded rendition had no audio track"
+                    continue
                 last_err = "file missing after download"
             else:
                 last_err = result.stderr.decode(errors="replace")[-300:] if result.stderr else "unknown error"
